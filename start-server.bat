@@ -1,20 +1,19 @@
-@echo off
+﻿@echo off
 chcp 65001 >nul
+rem сначала находим Node.js в исходной папке, потом переходим в server
+call "%~dp0tools\_find-node.bat"
+if errorlevel 1 (
+  pause
+  exit /b 1
+)
 cd /d "%~dp0server"
 echo Запуск сервера BankInvest (веб-версия + API для десктопа)
 echo База данных: Microsoft SQL Server
 echo.
 
-where node >nul 2>nul
-if errorlevel 1 (
-  echo Не найден Node.js. Установите Node.js 18 или новее: https://nodejs.org
-  pause
-  exit /b 1
-)
-
 if not exist "node_modules\mssql" (
   echo [1/2] Устанавливаю драйвер SQL Server ^(npm install^)...
-  call npm.cmd install --no-audit --no-fund
+  call "%NPM_CMD%" install --no-audit --no-fund
   if errorlevel 1 (
     echo.
     echo Не удалось установить пакет mssql. Проверьте интернет или выполните вручную:

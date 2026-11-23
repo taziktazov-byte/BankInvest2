@@ -2,6 +2,8 @@
 chcp 65001 >nul
 setlocal
 title BankInvest - подготовка базы данных
+rem каталог проекта запоминаем до перехода в server (нужен для tools\_find-node.bat)
+set "ROOT=%~dp0"
 cd /d "%~dp0server"
 
 echo ================================================================
@@ -23,15 +25,14 @@ if "%choice%"=="0" exit /b 0
 if "%choice%"=="3" goto check
 
 rem --- нужен sqlcmd: ищем его, затем ставим драйвер и запускаем node-скрипт ---
-where node >nul 2>nul
+call "%ROOT%tools\_find-node.bat"
 if errorlevel 1 (
-  echo Не найден Node.js. Установите Node.js 18+ с https://nodejs.org и запустите снова.
   pause
   exit /b 1
 )
 if not exist "node_modules\mssql" (
   echo Устанавливаю драйвер SQL Server ^(npm install^)...
-  call npm.cmd install --no-audit --no-fund
+  call "%NPM_CMD%" install --no-audit --no-fund
   if errorlevel 1 (
     echo Не удалось установить пакет mssql. Проверьте интернет или выполните: cd server ^&^& npm.cmd install
     pause
