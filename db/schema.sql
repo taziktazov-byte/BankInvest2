@@ -8,13 +8,27 @@
      * таблицы создаются только если их нет (IF OBJECT_ID ... IS NULL);
      * колонки, добавленные обновлениями (Clients.Kind,
        Securities.Price/PrevPrice), добавляются только если их нет;
-     * процедуры пересоздаются (CREATE OR ALTER).
+     * процедуры пересоздаются (DROP + CREATE — работает на любой версии);
+     * база BankInvest создаётся, если её нет, и выбирается автоматически.
 
-   Запуск:  sqlcmd -S localhost,1433 -U sa -P пароль -i db\schema.sql
-   или сервер сам выполнит этот файл при первом запуске.
+   Запуск:
+     * SSMS: открыть файл и нажать F5 (база выбирается сама, см. ниже);
+     * или: sqlcmd -S localhost -E -i db\schema.sql;
+     * или в папке server: npm run db:init.
    ===================================================================== */
 
 SET NOCOUNT ON;
+GO
+
+/* База данных: создаём, если её нет, и переключаемся на неё.
+   Для CREATE DATABASE нужно право dbcreator; если базы нет и права нет —
+   создайте её в SSMS вручную (New Database -> BankInvest) и запустите файл снова. */
+IF DB_ID('BankInvest') IS NULL
+  CREATE DATABASE BankInvest;
+GO
+USE BankInvest;
+GO
+
 SET XACT_ABORT ON;
 GO
 
@@ -188,7 +202,12 @@ GO
    пишет время через GETDATE(), поэтому время приложения, процедур и
    сервера всегда совпадает (одни и те же часы SQL Server).
    ===================================================================== */
-CREATE OR ALTER PROCEDURE usp_UpdatePrices AS
+-- CREATE OR ALTER появился только в SQL Server 2016 SP1, поэтому используем
+-- пару DROP + CREATE: результат тот же (процедура пересоздаётся), но работает везде.
+IF OBJECT_ID('usp_UpdatePrices', 'P') IS NOT NULL
+  DROP PROCEDURE usp_UpdatePrices;
+GO
+CREATE PROCEDURE usp_UpdatePrices AS
 BEGIN
   SET NOCOUNT ON;
   DECLARE @r INT, @added INT = 0;
@@ -243,7 +262,10 @@ BEGIN
 END
 GO
 
-CREATE OR ALTER PROCEDURE usp_BuyListing @ListingId INT, @BuyerId INT, @Qty INT AS
+IF OBJECT_ID('usp_BuyListing', 'P') IS NOT NULL
+  DROP PROCEDURE usp_BuyListing;
+GO
+CREATE PROCEDURE usp_BuyListing @ListingId INT, @BuyerId INT, @Qty INT AS
 BEGIN
   SET NOCOUNT ON; SET XACT_ABORT ON;
   BEGIN TRAN;

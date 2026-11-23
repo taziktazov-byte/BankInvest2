@@ -301,7 +301,7 @@ async function start() {
     console.error('  Проверьте:');
     console.error('   1) служба SQL Server запущена (services.msc -> SQL Server (MSSQLSERVER))');
     console.error('   2) TCP/IP включён, порт 1433 (SQL Server Configuration Manager)');
-    console.error('   3) логин и пароль: MSSQL_USER / MSSQL_PASSWORD (или Windows-аутентификация)');
+    console.error('   3) логин и пароль приложения: MSSQL_USER / MSSQL_PASSWORD (setx, затем новое окно cmd)');
     console.error('   4) база BankInvest существует, у логина есть права db_datareader/db_datawriter');
     console.error('  Подробнее: README_RU.md, раздел «SQL Server».');
     console.error('─'.repeat(64));

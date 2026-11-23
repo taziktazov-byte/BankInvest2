@@ -10,7 +10,7 @@
 // Connection settings (environment variables):
 //   MSSQL_SERVER    localhost            — хост или хост\экземпляр, можно с портом: localhost,1433
 //   MSSQL_DATABASE  BankInvest
-//   MSSQL_USER / MSSQL_PASSWORD          — SQL-логин; если не заданы — Windows-аутентификация
+//   MSSQL_USER / MSSQL_PASSWORD          — SQL-логин приложения (для локального SQL Server задайте оба)
 //   MSSQL_INSTANCE  SQLEXPRESS           — именованный экземпляр (необязательно)
 //   MSSQL_ENCRYPT / MSSQL_TRUST_CERT     — по умолчанию false / true (локальный сервер)
 //   MSSQL_POOL_MAX 10                    — размер пула соединений
@@ -60,7 +60,7 @@ function buildConfig() {
   else if (port) options.port = port;
   const cfg = { server, database: DATABASE, options, pool };
   if (USER) { cfg.user = USER; cfg.password = PASSWORD; }
-  else cfg.authentication = { type: 'default' };   // Windows-аутентификация
+  else cfg.authentication = { type: 'default' };   // без логина: текущий пользователь Windows (обычно SQL Server его не примет)
   return cfg;
 }
 
@@ -103,8 +103,29 @@ function sqlError(e) {
   }
   if (e && e.number === 4060) { out.key = 'db.connect'; out.hint = `База «${DATABASE}» не найдена — создайте её или разрешите BANKINVEST_AUTO_SCHEMA`; return out; }
   if (e && e.number === 18456) { out.key = 'db.login'; out.hint = `Пользователь «${USER || 'Windows'}» не прошёл проверку подлинности (MSSQL_USER / MSSQL_PASSWORD)`; return out; }
-  if (e && (e.number === 229 || e.number === 262 || e.number === 230)) { out.key = 'db.permission'; out.hint = 'Нужны права db_datareader, db_datawriter (и db_ddladmin для автосоздания схемы)'; return out; }
+  // 229/262/230 — нет прав; 15151 — нет права на изменение объекта
+  if (e && (e.number === 229 || e.number === 262 || e.number === 230 || e.number === 15151)) {
+    out.key = 'db.permission';
+    out.hint = 'Нужны права db_datareader, db_datawriter, а для изменения процедур — db_ddladmin (или владелец схемы dbo)';
+    return out;
+  }
+  // 2714 — объект уже есть (повторный CREATE), 156/102/1038 — синтаксис/пакет
+  if (e && e.number === 2714) { out.key = 'db.exists'; out.hint = 'Объект уже существует — используйте CREATE OR ALTER или DROP перед CREATE'; return out; }
+  if (e && (e.number === 156 || e.number === 102)) { out.key = 'db.syntax'; out.hint = 'Синтаксическая ошибка в тексте пакета SQL'; return out; }
   return out;
+}
+
+/** Человекочитаемое описание ошибки SQL: номер, строка и текст сервера (для db:check и старта). */
+function describeError(e) {
+  if (!e) return '';
+  const num = e.dbNumber || (e.cause && (e.cause.number || e.cause.code)) || e.number;
+  const line = e.cause && e.cause.lineNumber;
+  const text = e.dbMessage || (e.cause && e.cause.message) || e.message || String(e);
+  const parts = [];
+  if (num) parts.push(`[${num}]`);
+  parts.push(text);
+  if (line) parts.push(`(строка ${line})`);
+  return parts.join(' ');
 }
 
 // ---------------------------------------------------------------- helpers
@@ -126,30 +147,59 @@ function bind(req, params) {
 }
 
 // --- результат запроса -> массив объектов {Колонка: значение}
-// mssql без config.recordset возвращает построчные массивы + метаданные колонок.
+// mssql по умолчанию (arrayRowMode = false) отдаёт recordset как МАССИВ объектов:
+//   SELECT name FROM sys.tables  ->  [{ name: 'Clients' }, ...]
+// Настройку arrayRowMode намеренно не включаем: она включает построчные массивы,
+// а драйвер сам предупреждает, что она несовместима с useColumnNames.
+// Функция терпима к обоим форматам, чтобы не зависеть от режима драйвера.
 function toObjects(recordset) {
-  if (!recordset || !Array.isArray(recordset.rows)) return [];
-  const cols = Array.isArray(recordset.columns) && recordset.columns.length
-    ? recordset.columns.map(c => (c && c.name) || String(c))
-    : (recordset.rows[0] && recordset.rows[0].metadata ? recordset.rows[0].metadata.map(m => m.name) : null);
-  const out = [];
-  for (const row of recordset.rows) {
-    if (!cols) { out.push(Object.assign({}, row)); continue; }
+  if (!recordset) return [];
+  // вариант 1: массив объектов (обычный режим mssql) — это и есть результат
+  if (Array.isArray(recordset)) {
+    return recordset.map(row => {
+      if (row instanceof Date || typeof row !== 'object' || row === null) return { value: row };
+      if (Array.isArray(row)) return toObjectsFromArrays([row])[0] || {};
+      return Object.assign({}, row);
+    });
+  }
+  // вариант 2: { rows: [...], columns: [...] } (arrayRowMode / старые сборки)
+  if (Array.isArray(recordset.rows)) return toObjectsFromArrays(recordset.rows, recordset.columns);
+  return [];
+}
+
+function toObjectsFromArrays(rows, columns) {
+  const cols = Array.isArray(columns) && columns.length
+    ? columns.map(c => (c && (c.name || c.colName)) || String(c))
+    : null;
+  return rows.map(row => {
+    if (!cols) return Object.assign({}, row);
     const o = {};
     for (let i = 0; i < cols.length; i++) o[cols[i]] = row[i] === undefined ? null : row[i];
-    out.push(o);
-  }
-  return out;
+    return o;
+  });
 }
 
 // ---------------------------------------------------------------- query API
 // conn — соединение из tx(); по умолчанию берётся пул.
+// Первый непустой набор строк из ответа mssql (у процедур бывает несколько).
+function firstRows(raw) {
+  if (!raw) return [];
+  const set = raw.recordset !== undefined ? raw.recordset : raw.recordsets && raw.recordsets[0];
+  const rows = toObjects(set);
+  if (rows.length) return rows;
+  for (const extra of (raw.recordsets || [])) {
+    const more = toObjects(extra);
+    if (more.length) return more;
+  }
+  return rows;
+}
+
 async function query(text, params = [], conn = null) {
   const p = conn || await ensurePool();
   const req = bind(p.request(), params);
   try {
     const r = await req.query(text);
-    return { rows: toObjects(r.recordset), raw: r };
+    return { rows: firstRows(r), raw: r };
   } catch (e) {
     const mapped = tradeError(e);
     if (mapped) throw new ApiError(mapped, 400);
@@ -292,8 +342,13 @@ async function runScript(script, label) {
     try {
       await exec(batch);
     } catch (e) {
-      const hint = e instanceof ApiError ? `${e.key} ${e.hint || ''}` : String(e && e.message);
-      throw new Error(`db/${label}.sql, пакет ${i + 1}: ${hint}`);
+      const hint = e instanceof ApiError
+        ? `${e.key}${e.hint ? ' — ' + e.hint : ''}${e.dbMessage ? ' | ' + describeError(e) : ''}`
+        : String(e && e.message);
+      const err2 = new Error(`db/${label}.sql, пакет ${i + 1}: ${hint}`);
+      err2.dbNumber = e && e.dbNumber;
+      err2.dbMessage = e && describeError(e);
+      throw err2;
     }
   }
   return list.length;
@@ -321,7 +376,7 @@ async function init() {
 async function updatePrices() {
   try {
     const r = await exec('EXEC usp_UpdatePrices');
-    const set = r && r.recordset ? toObjects(r.recordset) : [];
+    const set = firstRows(r);
     const first = set.length ? Object.values(set[0])[0] : 0;
     return Number(first) || 0;
   } catch {
@@ -339,6 +394,7 @@ async function audit(login, action, details = '') {
 module.exports = {
   sql, ensurePool, closePool, init, updatePrices, audit,
   query, all, get, scalar, run, exec, tx,
-  hash, now, toIso, err, ApiError,
+  hash, now, toIso, err, ApiError, describeError,
+  toObjects, firstRows,   // экспортируются для тестов
   DB_FILE, DATABASE, SERVER, CONFIG,
 };
