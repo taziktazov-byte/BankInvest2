@@ -1,57 +1,271 @@
-// Database layer for BankInvest server.
-// Uses the built-in node:sqlite (Node >= 22.5, no npm dependencies at all).
-// The schema mirrors the SQL Server database used by the desktop client
-// (Clients, DepoAccounts, Securities, PriceHistory, Holdings, Listings,
-//  Transactions, Users, InvestmentProjects, AuditLog).
+// Database layer for the BankInvest server: Microsoft SQL Server.
+//
+// The schema is the original one (db/schema.sql — Database.sql + Update_v2/3/4),
+// and the business rules live in the database itself:
+//   * usp_BuyListing  — покупка по предложению (одна транзакция)
+//   * usp_UpdatePrices — почасовое «тиканье» цен
+// Both the web client and the desktop client reach this layer through the same
+// REST API, so both write to the same SQL Server database.
+//
+// Connection settings (environment variables):
+//   MSSQL_SERVER    localhost            — хост или хост\экземпляр, можно с портом: localhost,1433
+//   MSSQL_DATABASE  BankInvest
+//   MSSQL_USER / MSSQL_PASSWORD          — SQL-логин; если не заданы — Windows-аутентификация
+//   MSSQL_INSTANCE  SQLEXPRESS           — именованный экземпляр (необязательно)
+//   MSSQL_ENCRYPT / MSSQL_TRUST_CERT     — по умолчанию false / true (локальный сервер)
+//   MSSQL_POOL_MAX 10                    — размер пула соединений
+//   BANKINVEST_CONNECTION                — полная строка подключения (перекрывает всё выше)
+//   BANKINVEST_AUTO_SCHEMA    1          — при первом запуске выполнить db/schema.sql
+//   BANKINVEST_AUTO_SEED      1          — если база пустая, загрузить db/seed.sql
 'use strict';
 
 const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
-const { DatabaseSync } = require('node:sqlite');
+const sql = require('mssql');
 
-const DATA_DIR = process.env.BANKINVEST_DATA || path.join(__dirname, '..', 'data');
-fs.mkdirSync(DATA_DIR, { recursive: true });
-const DB_FILE = process.env.BANKINVEST_DB || path.join(DATA_DIR, 'bankinvest.db');
+// ---------------------------------------------------------------- configuration
+const SERVER = process.env.MSSQL_SERVER || process.env.BANKINVEST_SQL_SERVER || 'localhost';
+const DATABASE = process.env.MSSQL_DATABASE || 'BankInvest';
+const USER = process.env.MSSQL_USER || process.env.BANKINVEST_SQL_USER || '';
+const PASSWORD = process.env.MSSQL_PASSWORD ?? process.env.BANKINVEST_SQL_PASSWORD ?? '';
+const INSTANCE = process.env.MSSQL_INSTANCE || '';
+const POOL_MAX = Number(process.env.MSSQL_POOL_MAX || 10);
+const AUTO_SCHEMA = String(process.env.BANKINVEST_AUTO_SCHEMA ?? '1') !== '0';
+const AUTO_SEED = String(process.env.BANKINVEST_AUTO_SEED ?? '1') !== '0';
 
-const db = new DatabaseSync(DB_FILE);
-db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
+const boolEnv = (name, def) => {
+  const v = process.env[name];
+  if (v == null || v === '') return def;
+  return ['1', 'true', 'yes', 'on'].includes(String(v).toLowerCase());
+};
 
-// ---------- helpers ----------
-function all(sql, ...params) {
-  return db.prepare(sql).all(...params);
+function buildConfig() {
+  const pool = { max: POOL_MAX, min: 0, idleTimeoutMillis: 30000 };
+  if (process.env.BANKINVEST_CONNECTION) {
+    return { connectionString: process.env.BANKINVEST_CONNECTION, pool, options: {} };
+  }
+  // "host,1433" — порт, "host\\INSTANCE" — именованный экземпляр
+  let server = SERVER;
+  let port;
+  const comma = server.indexOf(',');
+  if (comma > 0) { port = Number(server.slice(comma + 1)); server = server.slice(0, comma); }
+  const options = {
+    encrypt: boolEnv('MSSQL_ENCRYPT', false),
+    trustServerCertificate: boolEnv('MSSQL_TRUST_CERT', true),
+    enableArithAbort: true,
+    useUTC: false,                       // GETDATE() — локальное время сервера, как были написаны процедуры
+  };
+  if (INSTANCE) options.instanceName = INSTANCE;
+  else if (port) options.port = port;
+  const cfg = { server, database: DATABASE, options, pool };
+  if (USER) { cfg.user = USER; cfg.password = PASSWORD; }
+  else cfg.authentication = { type: 'default' };   // Windows-аутентификация
+  return cfg;
 }
-function get(sql, ...params) {
-  return db.prepare(sql).get(...params) ?? null;
+
+const CONFIG = buildConfig();
+const DB_FILE = process.env.BANKINVEST_CONNECTION
+  ? '(строка подключения из BANKINVEST_CONNECTION)'
+  : `${CONFIG.server || SERVER}${CONFIG.options?.port ? ',' + CONFIG.options.port : ''}${CONFIG.options?.instanceName ? '\\' + CONFIG.options.instanceName : ''}/${DATABASE}`;
+
+let pool = null;
+
+// ---------------------------------------------------------------- pooling
+async function ensurePool() {
+  if (pool && pool.connected) return pool;
+  if (!pool) pool = new sql.ConnectionPool(CONFIG);
+  try {
+    await pool.connect();
+  } catch (e) {
+    pool = null;
+    throw sqlError(e);
+  }
+  return pool;
 }
-function scalar(sql, ...params) {
-  const row = get(sql, ...params);
+
+async function closePool() {
+  if (!pool) return;
+  try { await pool.close(); } catch { /* уже закрыт */ }
+  pool = null;
+}
+
+// Ошибки SQL Server превращаем в понятные подсказки (ключи переводятся в i18n.json).
+function sqlError(e) {
+  const out = new ApiError('db.error', 500);
+  out.cause = e;
+  out.dbNumber = e && (e.number || e.code);
+  out.dbMessage = String((e && e.message) || e);
+  if (['ELOGIN', 'ELOGINFAILED', 'ESOCKET', 'ECONNCLOSED', 'ETIMEOUT', 'ENOTFOUND', 'ECONNREFUSED', 'EINSTLOOKUP'].includes(String(e && e.code))) {
+    out.key = 'db.connect';
+    out.hint = `Сервер не отвечает: ${DB_FILE}. Проверьте службу SQL Server и TCP/IP (порт 1433).`;
+    return out;
+  }
+  if (e && e.number === 4060) { out.key = 'db.connect'; out.hint = `База «${DATABASE}» не найдена — создайте её или разрешите BANKINVEST_AUTO_SCHEMA`; return out; }
+  if (e && e.number === 18456) { out.key = 'db.login'; out.hint = `Пользователь «${USER || 'Windows'}» не прошёл проверку подлинности (MSSQL_USER / MSSQL_PASSWORD)`; return out; }
+  if (e && (e.number === 229 || e.number === 262 || e.number === 230)) { out.key = 'db.permission'; out.hint = 'Нужны права db_datareader, db_datawriter (и db_ddladmin для автосоздания схемы)'; return out; }
+  return out;
+}
+
+// ---------------------------------------------------------------- helpers
+function bind(req, params) {
+  for (let i = 0; i < params.length; i++) {
+    const v = params[i];
+    if (v === null || v === undefined) req.input('p' + (i + 1), sql.NVarChar(400), null);
+    else if (typeof v === 'number') req.input('p' + (i + 1), Number.isInteger(v) && Math.abs(v) <= 2147483647 ? sql.Int : sql.Float, v);
+    else if (typeof v === 'bigint') req.input('p' + (i + 1), sql.BigInt, v);
+    else if (typeof v === 'boolean') req.input('p' + (i + 1), sql.Bit, v);
+    else if (v instanceof Date) req.input('p' + (i + 1), sql.DateTime, v);
+    else {
+      const str = String(v);
+      // длину подбираем по значению: nvarchar(max) в сравнении мешает поиску по индексу
+      req.input('p' + (i + 1), str.length <= 400 ? sql.NVarChar(400) : sql.NVarChar(sql.MAX), str);
+    }
+  }
+  return req;
+}
+
+// --- результат запроса -> массив объектов {Колонка: значение}
+// mssql без config.recordset возвращает построчные массивы + метаданные колонок.
+function toObjects(recordset) {
+  if (!recordset || !Array.isArray(recordset.rows)) return [];
+  const cols = Array.isArray(recordset.columns) && recordset.columns.length
+    ? recordset.columns.map(c => (c && c.name) || String(c))
+    : (recordset.rows[0] && recordset.rows[0].metadata ? recordset.rows[0].metadata.map(m => m.name) : null);
+  const out = [];
+  for (const row of recordset.rows) {
+    if (!cols) { out.push(Object.assign({}, row)); continue; }
+    const o = {};
+    for (let i = 0; i < cols.length; i++) o[cols[i]] = row[i] === undefined ? null : row[i];
+    out.push(o);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- query API
+// conn — соединение из tx(); по умолчанию берётся пул.
+async function query(text, params = [], conn = null) {
+  const p = conn || await ensurePool();
+  const req = bind(p.request(), params);
+  try {
+    const r = await req.query(text);
+    return { rows: toObjects(r.recordset), raw: r };
+  } catch (e) {
+    const mapped = tradeError(e);
+    if (mapped) throw new ApiError(mapped, 400);
+    throw sqlError(e);
+  }
+}
+
+async function all(text, ...params) {
+  return (await query(text, params)).rows;
+}
+
+async function get(text, ...params) {
+  const list = (await query(text, params)).rows;
+  return list.length ? list[0] : null;
+}
+
+async function scalar(text, ...params) {
+  const row = await get(text, ...params);
   if (!row) return null;
   const v = Object.values(row)[0];
   return v === undefined ? null : v;
 }
-function run(sql, ...params) {
-  return db.prepare(sql).run(...params);
+
+/** DML: { changes, id } — id из OUTPUT INSERTED.Id, если запрос его вернул. */
+async function run(text, ...params) {
+  const { rows: list, raw } = await query(text, params);
+  const row = list[0] || null;
+  const id = row ? (row.Id ?? Object.values(row)[0]) : null;
+  const changes = Array.isArray(raw.rowsAffected) ? raw.rowsAffected.reduce((a, b) => a + b, 0) : null;
+  return { changes, id: id == null ? null : Number(id) };
 }
-function tx(fn) {
-  db.exec('BEGIN IMMEDIATE');
+
+/** Выполнить текст как есть (EXEC процедуры и т.п.). */
+async function exec(text, params = [], conn = null) {
+  const p = conn || await ensurePool();
+  const req = bind(p.request(), params);
   try {
-    const r = fn();
-    db.exec('COMMIT');
-    return r;
+    return await req.query(text);
   } catch (e) {
-    try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
-    throw e;
+    const mapped = tradeError(e);
+    if (mapped) throw new ApiError(mapped, 400);
+    throw sqlError(e);
   }
 }
+
+// Коды ошибок из процедур: RAISERROR(N'ERR_OWN',16,1) -> e.own и т.д.
+const TRADE_CODES = {
+  ERR_NOLISTING: 'e.nolisting', ERR_OWN: 'e.own', ERR_QTY: 'e.qty',
+  ERR_ACC: 'e.noaccount', ERR_SELLERQTY: 'e.sellerqty', ERR_FREE: 'e.free', ERR_PRICE: 'e.price',
+};
+function tradeError(e) {
+  const msg = String((e && e.message) || '');
+  for (const [code, key] of Object.entries(TRADE_CODES)) if (msg.includes(code)) return key;
+  return null;
+}
+
+/** Транзакция на отдельном соединении: fn(conn) получает его для всех запросов внутри. */
+async function tx(fn) {
+  const p = await ensurePool();
+  const conn = await p.connect().catch(e => { throw sqlError(e); });
+  const t = new sql.Transaction(conn);
+  try {
+    await t.begin();
+    const wrapped = {
+      all: (text, ...params) => allOn(conn, text, params),
+      get: (text, ...params) => getOn(conn, text, params),
+      scalar: (text, ...params) => scalarOn(conn, text, params),
+      run: (text, ...params) => runOn(conn, text, params),
+      exec: (text, params = []) => exec(text, params, conn),
+    };
+    const r = await fn(wrapped);
+    await t.commit();
+    return r;
+  } catch (e) {
+    try { await t.rollback(); } catch { /* уже откатана */ }
+    throw e instanceof ApiError ? e : sqlError(e);
+  } finally {
+    try { conn.release(); } catch { /* пул сам закроет */ }
+  }
+}
+
+async function allOn(conn, text, params) { return (await query(text, params, conn)).rows; }
+async function getOn(conn, text, params) { const l = (await query(text, params, conn)).rows; return l.length ? l[0] : null; }
+async function scalarOn(conn, text, params) { const r = await getOn(conn, text, params); if (!r) return null; const v = Object.values(r)[0]; return v === undefined ? null : v; }
+async function runOn(conn, text, params) {
+  const { rows: list, raw } = await query(text, params, conn);
+  const row = list[0] || null;
+  const id = row ? (row.Id ?? Object.values(row)[0]) : null;
+  const changes = Array.isArray(raw.rowsAffected) ? raw.rowsAffected.reduce((a, b) => a + b, 0) : null;
+  return { changes, id: id == null ? null : Number(id) };
+}
+
 function hash(password) {
   return crypto.createHash('sha256').update(String(password), 'utf8').digest('hex').toUpperCase();
 }
-const now = () => new Date().toISOString().replace('T', ' ').slice(0, 19);
 
-// ---------- errors with i18n keys ----------
-// Messages are translation keys from i18n.json, so both the web client and the
-// desktop client can show the text in the language the user picked.
+/** Текущее время SQL Server в том же формате, что отдавалось клиентам раньше: "2026-11-23 18:09:18". */
+async function now() {
+  const d = await scalar('SELECT GETDATE()');
+  return toIso(d);
+}
+
+/** Привести дату/время из SQL Server к строке "ГГГГ-ММ-ДД чч:мм:сс".
+    Время уже в нужном часовом поясе (mssql.options.useUTC = false), поэтому
+    локальные геттеры дают ровно то, что записано в базе. */
+function toIso(v) {
+  if (v == null) return null;
+  if (v instanceof Date) {
+    const p = n => String(n).padStart(2, '0');
+    return `${v.getFullYear()}-${p(v.getMonth() + 1)}-${p(v.getDate())} ` +
+           `${p(v.getHours())}:${p(v.getMinutes())}:${p(v.getSeconds())}`;
+  }
+  return String(v);
+}
+
+// ---------------------------------------------------------------- errors with i18n keys
 class ApiError extends Error {
   constructor(key, status = 400, params) {
     super(key);
@@ -62,322 +276,69 @@ class ApiError extends Error {
 }
 const err = (key, status = 400, params) => new ApiError(key, status, params);
 
-// ---------- schema ----------
-function migrate() {
-  db.exec(`
-  CREATE TABLE IF NOT EXISTS Clients (
-    Id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    Name      TEXT NOT NULL,
-    UNP       TEXT NOT NULL UNIQUE,
-    Address   TEXT NOT NULL DEFAULT '',
-    Contacts  TEXT NOT NULL DEFAULT '',
-    Kind      TEXT NOT NULL DEFAULT 'Company' CHECK (Kind IN ('Company','Personal')),
-    Status    TEXT NOT NULL DEFAULT 'Активен',
-    CreatedAt TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-  CREATE TABLE IF NOT EXISTS Issuers (
-    Id   INTEGER PRIMARY KEY AUTOINCREMENT,
-    Name TEXT NOT NULL UNIQUE
-  );
-  CREATE TABLE IF NOT EXISTS Securities (
-    Id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    IssuerId   INTEGER NOT NULL REFERENCES Issuers(Id),
-    Symbol     TEXT NOT NULL UNIQUE,
-    Name       TEXT NOT NULL,
-    Kind       TEXT NOT NULL DEFAULT 'Облигация',
-    Segment    TEXT NOT NULL DEFAULT 'Corp Bonds',
-    Nominal    REAL NOT NULL DEFAULT 100,
-    Volume     INTEGER NOT NULL DEFAULT 0,
-    Rate       REAL NOT NULL DEFAULT 0,
-    ExpenseRatio REAL NOT NULL DEFAULT 0,
-    Price      REAL NOT NULL DEFAULT 100,
-    PrevPrice  REAL NOT NULL DEFAULT 100,
-    Status     TEXT NOT NULL DEFAULT 'Размещён'
-  );
-  CREATE TABLE IF NOT EXISTS DepoAccounts (
-    Id       INTEGER PRIMARY KEY AUTOINCREMENT,
-    ClientId INTEGER NOT NULL REFERENCES Clients(Id) ON DELETE CASCADE,
-    Number   TEXT NOT NULL UNIQUE
-  );
-  CREATE TABLE IF NOT EXISTS Holdings (
-    Id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    DepoAccountId INTEGER NOT NULL REFERENCES DepoAccounts(Id) ON DELETE CASCADE,
-    SecurityId    INTEGER NOT NULL REFERENCES Securities(Id),
-    Quantity      INTEGER NOT NULL DEFAULT 0 CHECK (Quantity >= 0),
-    TargetPct     REAL NULL CHECK (TargetPct IS NULL OR (TargetPct >= 0 AND TargetPct <= 100)),
-    UNIQUE (DepoAccountId, SecurityId)
-  );
-  CREATE TABLE IF NOT EXISTS Listings (
-    Id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    SellerClientId INTEGER NOT NULL REFERENCES Clients(Id) ON DELETE CASCADE,
-    SecurityId     INTEGER NOT NULL REFERENCES Securities(Id),
-    Quantity       INTEGER NOT NULL CHECK (Quantity > 0),
-    Price          REAL NOT NULL CHECK (Price > 0),
-    Status         TEXT NOT NULL DEFAULT 'Активно',
-    CreatedAt      TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-  CREATE TABLE IF NOT EXISTS Transactions (
-    Id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    DepoAccountId INTEGER NOT NULL REFERENCES DepoAccounts(Id) ON DELETE CASCADE,
-    SecurityId    INTEGER NOT NULL REFERENCES Securities(Id),
-    Type          TEXT NOT NULL CHECK (Type IN ('Buy','Sell')),
-    Quantity      INTEGER NOT NULL,
-    Price         REAL NOT NULL,
-    Commission    REAL NOT NULL DEFAULT 0,
-    Status        TEXT NOT NULL DEFAULT 'Исполнена',
-    Date          TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-  CREATE TABLE IF NOT EXISTS Users (
-    Id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    CompanyId    TEXT NOT NULL,
-    Login        TEXT NOT NULL,
-    PasswordHash TEXT NOT NULL,
-    Role         TEXT NOT NULL DEFAULT 'Client' CHECK (Role IN ('Client','Employee','Admin')),
-    ClientId     INTEGER NULL REFERENCES Clients(Id) ON DELETE SET NULL,
-    IsActive     INTEGER NOT NULL DEFAULT 1,
-    CreatedAt    TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-  CREATE UNIQUE INDEX IF NOT EXISTS UX_Users_Company_Login ON Users(CompanyId, Login);
-  CREATE TABLE IF NOT EXISTS PriceHistory (
-    Id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    SecurityId INTEGER NOT NULL REFERENCES Securities(Id) ON DELETE CASCADE,
-    At         TEXT NOT NULL,
-    Price      REAL NOT NULL
-  );
-  CREATE UNIQUE INDEX IF NOT EXISTS UX_PriceHistory ON PriceHistory(SecurityId, At);
-  CREATE TABLE IF NOT EXISTS InvestmentProjects (
-    Id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    Name      TEXT NOT NULL,
-    Rate      REAL NOT NULL DEFAULT 10,
-    CashFlows TEXT NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS AuditLog (
-    Id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    At         TEXT NOT NULL DEFAULT (datetime('now')),
-    UserLogin  TEXT NOT NULL DEFAULT '',
-    Action     TEXT NOT NULL,
-    Details    TEXT NOT NULL DEFAULT ''
-  );
-  CREATE TABLE IF NOT EXISTS Sessions (
-    Token     TEXT PRIMARY KEY,
-    UserId    INTEGER NOT NULL REFERENCES Users(Id) ON DELETE CASCADE,
-    Login     TEXT NOT NULL,
-    Role      TEXT NOT NULL,
-    ClientId  INTEGER NULL,
-    Client    TEXT NOT NULL DEFAULT '',
-    Lang      INTEGER NOT NULL DEFAULT 0,
-    CreatedAt TEXT NOT NULL DEFAULT (datetime('now')),
-    SeenAt    TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-  CREATE INDEX IF NOT EXISTS IX_Listings_Seller ON Listings(SellerClientId, Status);
-  CREATE INDEX IF NOT EXISTS IX_Transactions_Depo ON Transactions(DepoAccountId);
-  `);
+// ---------------------------------------------------------------- schema / seed
+function readSqlFile(name) {
+  return fs.readFileSync(path.join(__dirname, '..', '..', 'db', name), 'utf8');
 }
 
-// ---------- demo data ----------
-const SECURITIES = [
-  // symbol, name, kind, segment, nominal, volume, rate, expenseRatio, price, issuer
-  ['ASB-GB-2027', 'Гособлигации Беларуси 2027', 'Облигация', 'Gov Bonds', 100, 500000, 9.5, 0.0, 101.20, 'Министерство финансов РБ'],
-  ['ASB-GB-2030', 'Гособлигации Беларуси 2030', 'Облигация', 'Gov Bonds', 100, 300000, 10.2, 0.0, 98.40, 'Министерство финансов РБ'],
-  ['ASB-CB-ASB27', 'Облигации Беларусбанка 2027', 'Облигация', 'Corp Bonds', 100, 200000, 12.0, 0.1, 102.60, 'ОАО «АСБ Беларусбанк»'],
-  ['ASB-CB-BPS28', 'Облигации Белпромстройбанка 2028', 'Облигация', 'Corp Bonds', 100, 150000, 13.4, 0.2, 99.80, 'ОАО «Белпромстройбанк»'],
-  ['ASB-CB-MTS29', 'Облигации МТС 2029', 'Облигация', 'Corp Bonds', 100, 120000, 14.1, 0.2, 100.55, 'ООО «МТС»'],
-  ['ASB-EQ-BNB', 'Акции Беларусбанка', 'Акция', 'Equities', 10, 800000, 0, 0.3, 12.84, 'ОАО «АСБ Беларусбанк»'],
-  ['ASB-EQ-MTS', 'Акции МТС', 'Акция', 'Equities', 10, 600000, 0, 0.3, 8.15, 'ООО «МТС»'],
-  ['ASB-EQ-BMK', 'Акции Белметаллург', 'Акция', 'Equities', 10, 400000, 0, 0.4, 24.30, 'ОАО «Белметаллург»'],
-  ['ASB-EQ-AKB', 'Акции Агрокомбината «Днепр»', 'Акция', 'Equities', 10, 350000, 0, 0.4, 5.62, 'ОАО «Агрокомбинат Днепр»'],
-  ['ASB-EQ-FNB', 'Акции Финбанка', 'Акция', 'Equities', 10, 250000, 0, 0.35, 17.05, 'ОАО «Финбанк»'],
-  ['ASB-CB-GRB27', 'Облигации Гроднооблгаза 2027', 'Облигация', 'Corp Bonds', 100, 90000, 11.6, 0.15, 100.10, 'ОАО «Гроднооблгаз»'],
-  ['ASB-EQ-BKZ', 'Акции Белкалий', 'Акция', 'Equities', 10, 180000, 0, 0.4, 31.90, 'ОАО «Белкалий»'],
-];
-
-const CLIENTS = [
-  // name, unp, address, contacts, kind
-  ['ООО «Вектор Плюс»', '100234567', 'г. Минск, ул. Тимирязева, 65Б', '+375 17 234-56-78', 'Company'],
-  ['ОАО «Стройинвест»', '190987654', 'г. Минск, пр-т Победителей, 23', '+375 17 345-67-89', 'Company'],
-  ['ООО «БелАгроТрейд»', '191345678', 'г. Гомель, ул. Советская, 14', '+375 232 56-78-90', 'Company'],
-  ['Иванов Иван Иванович', '900012345', 'г. Минск, ул. Некрасова, 8', '+375 29 123-45-67', 'Personal'],
-  ['Ковалёва Мария Сергеевна', '900054321', 'г. Гродно, ул. Замковая, 3', '+375 29 765-43-21', 'Personal'],
-];
-
-const STARTER_HOLDINGS = {
-  'ООО «Вектор Плюс»': [['ASB-GB-2027', 15000], ['ASB-CB-ASB27', 8000], ['ASB-EQ-BNB', 25000], ['ASB-EQ-MTS', 12000]],
-  'ОАО «Стройинвест»': [['ASB-GB-2030', 20000], ['ASB-CB-BPS28', 5000], ['ASB-EQ-BMK', 9000]],
-  'ООО «БелАгроТрейд»': [['ASB-CB-MTS29', 6000], ['ASB-EQ-AKB', 18000], ['ASB-CB-GRB27', 4000]],
-  'Иванов Иван Иванович': [['ASB-EQ-BNB', 4200], ['ASB-EQ-FNB', 700], ['ASB-GB-2027', 1200]],
-  'Ковалёва Мария Сергеевна': [['ASB-EQ-BKZ', 300], ['ASB-EQ-AKB', 2500], ['ASB-CB-ASB27', 900]],
-};
-
-const DEMO_ACCOUNTS = [
-  // login, password, role, clientName (null for pure staff)
-  ['admin', 'admin123', 'Admin', null],
-  ['employee', 'employee123', 'Employee', null],
-  ['client', 'client123', 'Client', 'ООО «Вектор Плюс»'],
-];
-
-function seed() {
-  if (scalar('SELECT COUNT(*) FROM Securities') > 0) return false;
-  tx(() => {
-    // issuers
-    const issuerNames = [...new Set(SECURITIES.map(s => s[9]))];
-    for (const n of issuerNames) run('INSERT INTO Issuers(Name) VALUES (?)', n);
-    const issuerId = Object.fromEntries(all('SELECT Id, Name FROM Issuers').map(r => [r.Name, r.Id]));
-
-    for (const [sym, name, kind, seg, nom, vol, rate, exp, price, issuer] of SECURITIES) {
-      run(`INSERT INTO Securities(IssuerId,Symbol,Name,Kind,Segment,Nominal,Volume,Rate,ExpenseRatio,Price,PrevPrice,Status)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,'Размещён')`,
-        issuerId[issuer], sym, name, kind, seg, nom, vol, rate, exp, price, price);
-    }
-
-    for (const [name, unp, addr, contacts, kind] of CLIENTS) {
-      const info = run(`INSERT INTO Clients(Name,UNP,Address,Contacts,Kind,Status) VALUES (?,?,?,?,?,'Активен')`, name, unp, addr, contacts, kind);
-      const clientId = Number(info.lastInsertRowid);
-      run(`INSERT INTO DepoAccounts(ClientId,Number) VALUES (?,?)`, clientId, 'DEPO-' + unp);
-      for (const [sym, qty] of STARTER_HOLDINGS[name] || []) {
-        const secId = scalar('SELECT Id FROM Securities WHERE Symbol=?', sym);
-        run('INSERT INTO Holdings(DepoAccountId,SecurityId,Quantity) VALUES ((SELECT Id FROM DepoAccounts WHERE ClientId=?),?,?)', clientId, secId, qty);
-      }
-      // портфель клиента: целевые доли (картина «докупить/продать» на главной)
-      if (kind === 'Personal') {
-        run(`UPDATE Holdings SET TargetPct = 40 WHERE DepoAccountId=(SELECT Id FROM DepoAccounts WHERE ClientId=?) AND Id=(SELECT MIN(Id) FROM Holdings WHERE DepoAccountId=(SELECT Id FROM DepoAccounts WHERE ClientId=?))`, clientId, clientId);
-      }
-    }
-
-    // demo users: staff + one client per company
-    const clientByName = Object.fromEntries(all('SELECT Id, Name FROM Clients').map(r => [r.Name, r.Id]));
-    for (const [login, pass, role, clientName] of DEMO_ACCOUNTS) {
-      const clientId = clientName ? clientByName[clientName] : null;
-      run(`INSERT INTO Users(CompanyId,Login,PasswordHash,Role,ClientId) VALUES (?,?,?,?,?)`,
-        clientId ? 'ASB' : 'ASB', login, hash(pass), role, clientId);
-    }
-    // по логину на каждого клиента (Company ID = УНП, на случай проверки)
-    for (const [name, unp] of CLIENTS) {
-      const cid = clientByName[name];
-      const login = unp;
-      run(`INSERT OR IGNORE INTO Users(CompanyId,Login,PasswordHash,Role,ClientId) VALUES (?,?,?,?,?)`,
-        unp, login, hash('client123'), 'Client', cid);
-    }
-
-    run(`INSERT INTO InvestmentProjects(Name,Rate,CashFlows) VALUES (?,?,?)`, 'Модернизация склада', 12, '-150000;45000;60000;70000;50000');
-    run(`INSERT INTO InvestmentProjects(Name,Rate,CashFlows) VALUES (?,?,?)`, 'Солнечная электростанция', 10, '-300000;80000;90000;95000;100000;60000');
-    run(`INSERT INTO InvestmentProjects(Name,Rate,CashFlows) VALUES (?,?,?)`, 'Логистический хаб «Запад»', 15, '-500000;120000;180000;220000;240000;160000');
-
-    // предложения на рынке (от клиентов)
-    const listings = [
-      ['ООО «Вектор Плюс»', 'ASB-EQ-BNB', 3000, 12.40],
-      ['ОАО «Стройинвест»', 'ASB-EQ-BMK', 1500, 24.90],
-      ['Иванов Иван Иванович', 'ASB-EQ-FNB', 200, 16.60],
-      ['ООО «БелАгроТрейд»', 'ASB-EQ-AKB', 5000, 5.40],
-      ['Ковалёва Мария Сергеевна', 'ASB-EQ-BKZ', 100, 32.80],
-      ['ООО «Вектор Плюс»', 'ASB-CB-ASB27', 2000, 101.90],
-      ['ОАО «Стройинвест»', 'ASB-GB-2030', 4000, 98.10],
-      ['Иванов Иван Иванович', 'ASB-EQ-BNB', 800, 13.10],
-    ];
-    for (const [client, sym, qty, price] of listings) {
-      run(`INSERT INTO Listings(SellerClientId,SecurityId,Quantity,Price,Status) VALUES (?,?,?,?,'Активно')`,
-        clientByName[client], scalar('SELECT Id FROM Securities WHERE Symbol=?', sym), qty, price);
-    }
-  });
-  return true;
+/** Разбить скрипт на пакеты по GO (как это делает sqlcmd). */
+function batches(script) {
+  return script.split(/^\s*GO\s*$/im).map(s => s.trim()).filter(Boolean);
 }
 
-// ---------- цена: история и пересчёт Price/PrevPrice ----------
-// Полный аналог usp_UpdatePrices из SQL Server.
-function updatePrices() {
-  const hourMs = 3600 * 1000;
-  const startOfHour = d => new Date(Math.floor(d.getTime() / hourMs) * hourMs);
-  const iso = d => d.toISOString().replace('T', ' ').slice(0, 19);
-
-  return tx(() => {
-    const nowHour = startOfHour(new Date());
-    const secs = all(`SELECT Id, Nominal, Segment, Price FROM Securities WHERE Status='Размещён' AND Price > 0`);
-    let added = 0;
-    const maxBack = 24 * 30; // не более месяца назад за один вызов, но и весь пропуск тоже
-
-    for (const s of secs) {
-      let last = get('SELECT At, Price FROM PriceHistory WHERE SecurityId=? ORDER BY At DESC LIMIT 1', s.Id);
-      if (!last) {
-        run('INSERT INTO PriceHistory(SecurityId,At,Price) VALUES (?,?,?)', s.Id, iso(nowHour), s.Price);
-        added++;
-        continue;
-      }
-      let t = new Date(last.At.replace(' ', 'T') + 'Z');
-      let prev = last.Price;
-      const everyMs = s.Segment === 'Gov Bonds' || s.Segment === 'Corp Bonds' ? 24 * hourMs : hourMs; // по истории 1 точка в сутки для бумаг с низкой волатильностью? нет: каждый час
-      let guard = 0;
-      while (true) {
-        t = new Date(t.getTime() + hourMs);
-        if (t > nowHour) break;
-        if (++guard > 24 * 60) break;
-        const step = s.Segment === 'Gov Bonds' ? 0.0005 : s.Segment === 'Corp Bonds' ? 0.0010 : 0.0035;
-        const f = 1 + step * ((Math.random() * 2001 - 1000) / 1000.0);
-        const lo = (s.Segment === 'Gov Bonds' || s.Segment === 'Corp Bonds') ? 0.85 : 0.35;
-        const hi = (s.Segment === 'Gov Bonds' || s.Segment === 'Corp Bonds') ? 1.15 : 3.00;
-        let p = prev * f;
-        if (p < s.Nominal * lo) p = s.Nominal * lo;
-        if (p > s.Nominal * hi) p = s.Nominal * hi;
-        p = Math.round(p * 100) / 100;
-        run('INSERT OR IGNORE INTO PriceHistory(SecurityId,At,Price) VALUES (?,?,?)', s.Id, iso(t), p);
-        prev = p;
-        added++;
-      }
+async function runScript(script, label) {
+  const list = batches(script);
+  for (const [i, batch] of list.entries()) {
+    try {
+      await exec(batch);
+    } catch (e) {
+      const hint = e instanceof ApiError ? `${e.key} ${e.hint || ''}` : String(e && e.message);
+      throw new Error(`db/${label}.sql, пакет ${i + 1}: ${hint}`);
     }
-
-    // Price = последняя точка, PrevPrice = последняя точка не позже «сейчас - 24ч»
-    const nowIso = iso(new Date());
-    const before24 = iso(new Date(Date.now() - 24 * hourMs));
-    for (const s of secs) {
-      const lastP = scalar('SELECT Price FROM PriceHistory WHERE SecurityId=? ORDER BY At DESC LIMIT 1', s.Id) ?? s.Price;
-      const prevP = scalar('SELECT Price FROM PriceHistory WHERE SecurityId=? AND At <= ? ORDER BY At DESC LIMIT 1', s.Id, before24) ?? s.Price;
-      run('UPDATE Securities SET Price=?, PrevPrice=? WHERE Id=?', lastP, prevP, s.Id);
-    }
-    return added;
-  });
+  }
+  return list.length;
 }
 
-function backfillHistory(days = 30, years = 5) {
-  // Первый запуск: наполняем историю цен, чтобы график и «изменение за 24 ч» были осмысленными.
-  // Последние `days` дней — по часам (вкладка «часы»), более ранний период — по дням
-  // (вкладки «дни», «недели», «месяцы», «годы»).
-  const hourMs = 3600 * 1000;
-  const dayMs = 24 * hourMs;
-  const iso = d => d.toISOString().replace('T', ' ').slice(0, 19);
-  const nowHour = new Date(Math.floor(Date.now() / hourMs) * hourMs);
-  tx(() => {
-    for (const s of all(`SELECT Id, Nominal, Segment, Price FROM Securities WHERE Status='Размещён'`)) {
-      if (scalar('SELECT COUNT(*) FROM PriceHistory WHERE SecurityId=?', s.Id) > 0) continue;
-      const step = s.Segment === 'Gov Bonds' ? 0.0004 : s.Segment === 'Corp Bonds' ? 0.0009 : 0.0045;
-      const lo = (s.Segment === 'Gov Bonds' || s.Segment === 'Corp Bonds') ? 0.85 : 0.35;
-      const hi = (s.Segment === 'Gov Bonds' || s.Segment === 'Corp Bonds') ? 1.15 : 3.00;
-      // сначала строим ряд «назад от текущей цены», затем пишем в хронологическом порядке
-      const times = [];
-      for (let d = years * 365; d > days; d--) times.push([new Date(nowHour.getTime() - d * dayMs), step * 1.6]);
-      for (let h = days * 24; h >= 0; h--) times.push([new Date(nowHour.getTime() - h * hourMs), step]);
-      let price = s.Price;
-      const pts = new Array(times.length);
-      for (let i = times.length - 1; i >= 0; i--) {
-        pts[i] = [iso(times[i][0]), Math.round(price * 100) / 100];
-        price = price * (1 + times[i][1] * ((Math.random() * 2001 - 1000) / 1000.0));
-        price = Math.min(Math.max(price, s.Nominal * lo), s.Nominal * hi);
-      }
-      for (const [at, p] of pts) run('INSERT OR IGNORE INTO PriceHistory(SecurityId,At,Price) VALUES (?,?,?)', s.Id, at, p);
+async function init() {
+  await ensurePool();
+  let fresh = false;
+  if (!(await scalar("SELECT OBJECT_ID('Clients','U')"))) {
+    if (!AUTO_SCHEMA) {
+      throw new ApiError('db.noschema', 500);
     }
-  });
-}
-
-function audit(login, action, details = '') {
-  try { run('INSERT INTO AuditLog(UserLogin,Action,Details) VALUES (?,?,?)', login || '', action, details); } catch { /* журнал не должен ломать операцию */ }
-}
-
-function init() {
-  migrate();
-  const fresh = seed();
-  if (fresh) backfillHistory(30, 5);
-  updatePrices();
+    await runScript(readSqlFile('schema.sql'), 'schema');
+  }
+  const empty = Number(await scalar('SELECT COUNT(*) FROM Clients')) === 0;
+  if (empty) {
+    if (!AUTO_SEED) throw new ApiError('db.empty', 500);
+    await runScript(readSqlFile('seed.sql'), 'seed');
+    fresh = true;
+  }
   return { dbFile: DB_FILE, fresh };
 }
 
+/** Аналог EXEC usp_UpdatePrices: число добавленных точек истории цен. */
+async function updatePrices() {
+  try {
+    const r = await exec('EXEC usp_UpdatePrices');
+    const set = r && r.recordset ? toObjects(r.recordset) : [];
+    const first = set.length ? Object.values(set[0])[0] : 0;
+    return Number(first) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function audit(login, action, details = '') {
+  try {
+    await run(`INSERT INTO AuditLog(UserLogin, Action, Details) OUTPUT INSERTED.Id AS Id VALUES (?, ?, ?)`,
+      login || '', action, String(details || '').slice(0, 500));
+  } catch { /* журнал не должен ломать операцию */ }
+}
+
 module.exports = {
-  db, all, get, scalar, run, tx, hash, now, err, ApiError,
-  init, seed, updatePrices, backfillHistory, audit, DB_FILE, DATA_DIR,
+  sql, ensurePool, closePool, init, updatePrices, audit,
+  query, all, get, scalar, run, exec, tx,
+  hash, now, toIso, err, ApiError,
+  DB_FILE, DATABASE, SERVER, CONFIG,
 };

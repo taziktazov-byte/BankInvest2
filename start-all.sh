@@ -4,18 +4,32 @@
 set -e
 cd "$(dirname "$0")"
 
-echo "[1/3] Запускаю сервер (веб-версия + API)..."
+if [ -f server/.env ]; then set -a; . ./server/.env; set +a; fi
+
+if [ ! -d server/node_modules/mssql ]; then
+  echo "[0/3] Устанавливаю драйвер SQL Server (npm install)..."
+  (cd server && npm install --no-audit --no-fund)
+fi
+
+echo "[1/3] Проверяю SQL Server..."
+if ! (cd server && node src/tools/db-check.js); then
+  echo "Подключение к SQL Server не удалось — сервер не запустится."
+  echo "Проверьте службу SQL Server, TCP/IP (порт 1433) и MSSQL_USER / MSSQL_PASSWORD."
+  exit 1
+fi
+
+echo "[2/3] Запускаю сервер (веб-версия + API)..."
 node server/src/server.js &
 SERVER_PID=$!
 trap 'kill $SERVER_PID 2>/dev/null' EXIT
 
-echo "[2/3] Жду готовности сервера..."
+echo "Жду готовности сервера..."
 for _ in $(seq 1 40); do
   if curl -fsS http://localhost:8787/api/ping >/dev/null 2>&1; then break; fi
   sleep 0.5
 done
 
-echo "[3/3] Веб-версия: http://localhost:8787/"
+echo "Веб-версия: http://localhost:8787/"
 if command -v xdg-open >/dev/null 2>&1; then xdg-open http://localhost:8787/ >/dev/null 2>&1 || true
 elif command -v open >/dev/null 2>&1; then open http://localhost:8787/ >/dev/null 2>&1 || true
 fi

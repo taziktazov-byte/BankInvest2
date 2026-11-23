@@ -228,9 +228,9 @@ function renderLogin(mode = 'user') {
     </div>
     ${langBar(true)}
     <div style="color:rgba(255,255,255,.72);font-size:12px;text-align:center">
-      ${state.lang === 1 ? 'Demo: admin / admin123 · employee / employee123 · client / client123'
-        : state.lang === 2 ? 'Дэма: admin / admin123 · employee / employee123 · client / client123'
-        : 'Демо-доступы: admin / admin123 · employee / employee123 · client / client123'}
+      ${state.lang === 1 ? 'Demo: admin / admin123 · employee / emp123 · 100200300 / client123'
+        : state.lang === 2 ? 'Дэма: admin / admin123 · employee / emp123 · 100200300 / client123'
+        : 'Демо-доступы: admin / admin123 · employee / emp123 · 100200300 / client123'}
     </div>
   </div>`;
 
@@ -898,14 +898,14 @@ function drawChart(points, grain) {
 
   const fmtAxis = i => {
     const t = points[i].t;
-    if (grain === 0) { const d = new Date(t.replace(' ', 'T') + 'Z'); return d.toLocaleString(undefined, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }); }
+    if (grain === 0) { const d = new Date(t.replace(' ', 'T')); return d.toLocaleString(undefined, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }); }
     if (grain === 1 || grain === 2) { const p = t.split('-'); return p[2] + '.' + p[1]; }
     if (grain === 3) { const p = t.split('-'); return p[1] + '.' + p[0]; }
     return t;
   };
   const fmtTip = i => {
     const t = points[i].t;
-    if (grain === 0) { const d = new Date(t.replace(' ', 'T') + 'Z'); return d.toLocaleString(); }
+    if (grain === 0) { const d = new Date(t.replace(' ', 'T')); return d.toLocaleString(); }
     return t;
   };
 

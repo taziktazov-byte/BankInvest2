@@ -19,28 +19,45 @@ Authorization: Bearer <token>
 Коды ответов: `200` — успех, `400` — нарушено бизнес-правило, `401` — нет/просрочен токен,
 `403` — нет прав, `404` — не найдено, `500` — внутренняя ошибка.
 
+Хранилище — **Microsoft SQL Server** (база `BankInvest`, процедуры `usp_BuyListing` и
+`usp_UpdatePrices`). Даты в ответах — строки `"ГГГГ-ММ-ДД чч:мм:сс"` (время SQL Server),
+числа — обычные `number`, `BIT` — `0`/`1`.
+
+Если база недоступна, ответ `500` содержит отдельный ключ и подсказку:
+
+```json
+{ "error": { "key": "db.connect", "hint": "Сервер не отвечает: localhost,1433/BankInvest. ..." } }
+```
+
+Ключи ошибок базы: `db.connect` (нет связи/TCP-IP/порт), `db.login` (логин или пароль),
+`db.permission` (нет прав `db_datareader`/`db_datawriter`), `db.noschema` (нет таблиц),
+`db.empty` (пустая база), `db.error` (прочее).
+
 ---
 
 ## Служебные
 
 | Метод | Путь | Описание |
 |---|---|---|
-| GET | `/health` | версия, время, путь к файлу базы |
-| GET | `/ping` | проверка связи: число бумаг/клиентов/сессий, ваша сессия (если токен передан) |
+| GET | `/health` | версия, время, `database: "sqlserver"`, адрес базы `dbFile` |
+| GET | `/ping` | проверка связи: число бумаг/клиентов/сессий, адрес базы, ваша сессия (если токен передан) |
 | GET | `/i18n` | словари интерфейса: `{ languages: ["ru","en","be"], dict: { key: ["ru","en","be"] } }` |
 
 ## Аутентификация и сессия
 
 ### POST `/auth/login`
 ```json
-{ "id": "client", "password": "client123", "mode": "user" }
+{ "id": "190456789", "password": "client123", "mode": "company" }
 ```
 `mode`: `"user"` — вкладка «ID пользователя», `"company"` — «ID организации» (УНП).
 Ответ:
 ```json
-{ "token": "…", "login": "client", "role": "Client", "clientId": 1,
-  "clientName": "ООО «Вектор Плюс»", "lang": 0, "isStaff": false, "isAdmin": false }
+{ "token": "…", "login": "190456789", "role": "Client", "clientId": 2,
+  "clientName": "ООО «БелТехСервис»", "lang": 0, "isStaff": false, "isAdmin": false }
 ```
+
+Демо-учётки: `admin/admin123`, `employee/emp123`, `ivanova/emp123`, `100200300/client123`,
+`ivanov/user123` — полный список в `README_RU.md`, раздел 3.
 
 | Метод | Путь | Описание |
 |---|---|---|
@@ -97,7 +114,7 @@ Authorization: Bearer <token>
 
 | Метод | Путь | Тело | Описание |
 |---|---|---|---|
-| POST | `/trade/buy` | `{ listingId, qty, clientId? }` | покупка по предложению. Ответ: `{ qty, symbol, price, amount, commission, total }` |
+| POST | `/trade/buy` | `{ listingId, qty, clientId? }` | покупка по предложению — выполняется процедурой `usp_BuyListing` в одной транзакции. Ответ: `{ qty, symbol, price, amount, commission, total }` |
 | POST | `/trade/sell` | `{ securityId, qty, price, clientId? }` | выставить на продажу. Ответ: `{ symbol, qty, price, amount, commission, receive }` |
 | POST | `/trade/withdraw` | `{ listingId, clientId? }` | отозвать своё предложение |
 
@@ -151,7 +168,7 @@ curl -N "http://localhost:8787/api/events?token=<token>"
 ```bash
 TOKEN=$(curl -s -X POST localhost:8787/api/auth/login \
   -H 'content-type: application/json' \
-  -d '{"id":"client","password":"client123","mode":"user"}' | jq -r .token)
+  -d '{"id":"admin","password":"admin123","mode":"user"}' | jq -r .token)
 
 curl -s localhost:8787/api/portfolio -H "authorization: Bearer $TOKEN" | jq '.total'
 curl -s localhost:8787/api/offers    -H "authorization: Bearer $TOKEN" | jq '.[0]'
