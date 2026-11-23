@@ -90,6 +90,38 @@ function registeredInstances() {
   return list;
 }
 
+/**
+ * Настройки протокола TCP/IP из реестра — видно, включён ли он и на каком порту,
+ * без SQL Server Configuration Manager.
+ *   HKLM\SOFTWARE\Microsoft\Microsoft SQL Server\<ID>\MSSQLServer\SuperSocketNetLib\Tcp
+ */
+function tcpSettings() {
+  if (!isWin) return [];
+  const out = [];
+  for (const inst of registeredInstances()) {
+    const base = `HKLM\\SOFTWARE\\Microsoft\\Microsoft SQL Server\\${inst.id}\\MSSQLServer\\SuperSocketNetLib\\Tcp`;
+    const raw = sh('reg', ['query', base, '/v', 'Enabled']);
+    const en = raw.match(/Enabled\s+REG_DWORD\s+0x([0-9a-f]+)/i);
+    const ipAll = sh('reg', ['query', base + '\\IPAll']);
+    // построчно: пустое значение (REG_SZ с одним переводом строки) не должно
+    // «съедать» следующую строку
+    const value = (text, key) => {
+      for (const raw of text.split(/\r?\n/)) {
+        const m = raw.trim().match(/^(\w+)\s+REG_SZ\s*(.*)$/i);
+        if (m && m[1].toLowerCase() === key.toLowerCase()) return m[2].trim();
+      }
+      return '';
+    };
+    out.push({
+      name: inst.name,
+      enabled: en ? parseInt(en[1], 16) === 1 : null,
+      port: value(ipAll, 'TcpPort'),
+      dynamic: value(ipAll, 'TcpDynamicPorts')
+    });
+  }
+  return out;
+}
+
 async function main() {
   console.log(line);
   console.log('  BankInvest — диагностика подключения к SQL Server');
@@ -164,6 +196,37 @@ async function main() {
   }
   console.log('');
 
+  // ---------- 3b. TCP/IP в реестре ----------
+  console.log('  4) Протокол TCP/IP (по настройкам сервера)');
+  const tcp = tcpSettings();
+  if (!isWin) {
+    info('проверка доступна только на Windows');
+  } else if (!tcp.length) {
+    info('не удалось прочитать настройки');
+  } else {
+    for (const t of tcp) {
+      if (t.enabled === null) {
+        info(`${t.name}: настройка Enabled не прочитана — посмотрите Configuration Manager`);
+      } else if (t.enabled) {
+        ok(`${t.name}: TCP/IP включён` + (t.port ? `, порт ${t.port}` : '') +
+           (t.dynamic ? `, динамический порт ${t.dynamic}` : ''));
+        if (t.dynamic && !t.port) {
+          bad(`${t.name}: порт динамический (${t.dynamic}), а приложение ходит на 1433`);
+          info('задайте фиксированный: Configuration Manager → TCP/IP → IPAll → TCP Port 1433,');
+          info('TCP Dynamic Ports — пусто, затем перезапустите службу');
+        } else if (t.port && t.port !== '1433') {
+          bad(`${t.name}: порт ${t.port}, а приложение ходит на 1433`);
+          info(`укажите его: setx MSSQL_SERVER \"localhost,${t.port}\"`);
+        }
+      } else {
+        bad(`${t.name}: TCP/IP ВЫКЛЮЧЕН — Node.js не сможет подключиться никак`);
+        info('Configuration Manager → SQL Server Network Configuration →');
+        info(`  Protocols for ${t.name} → TCP/IP → Enable → перезапуск службы`);
+      }
+    }
+  }
+  console.log('');
+
   // ---------- 4. Итог ----------
   console.log(line);
   console.log('  Что делать (по порядку)');
@@ -200,7 +263,17 @@ async function main() {
     console.log('    • логин отключён → ALTER LOGIN sa ENABLE; (в SSMS под администратором)');
     console.log('    • нет базы BankInvest → npm run db:init');
   }
-  console.log(line);
+  console.log('  Проверить прямо в SSMS (New Query) — какой вход работает:');
+  console.log('     SELECT @@SERVERNAME AS Сервер, SUSER_NAME() AS Вход,');
+  console.log('            SERVERPROPERTY(\'InstanceName\') AS Экземпляр;');
+  console.log('     SELECT local_net_address, local_tcp_port FROM sys.dm_exec_connections');
+  console.log('       WHERE session_id = @@SPID;   -- порт, который реально слушает сервер');
+  console.log('');
+  console.log('  Если SSMS подключается через Windows-вход (DESKTOP-XXX\\ИмяПользователя),');
+  console.log('  а приложение ходит под sa — включите смешанный режим: SSMS -> правой');
+  console.log('  кнопкой по серверу -> Свойства -> Безопасность ->');
+  console.log('  "Режим проверки подлинности SQL Server и Windows" -> перезапуск службы.');
+  console.log('');
   console.log('  Ещё варианты, если SQL Server ставить не хочется:');
   console.log('    docker compose up -d   (в корне проекта: база + сервер в контейнерах)');
   console.log(line);

@@ -34,6 +34,7 @@ copy /y start-all.sh "%KIT%\" >nul 2>nul
 copy /y start-server.sh "%KIT%\" >nul 2>nul
 copy /y db-setup.bat "%KIT%\" >nul
 copy /y ПРОВЕРКА-СИСТЕМЫ.bat "%KIT%\" >nul
+copy /y ДИАГНОСТИКА-SQL.bat "%KIT%\" >nul
 if exist tools\_find-node.bat (
   if not exist "%KIT%\tools" mkdir "%KIT%\tools"
   copy /y tools\_find-node.bat "%KIT%\tools\" >nul
