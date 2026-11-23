@@ -40,11 +40,11 @@ async function main() {
   // то есть требует права менять структуру базы. У логина приложения
   // (bankinvest) их обычно нет — иначе ошибка вылезет посреди скрипта,
   // уже после того как часть объектов создана.
-  const canAlter = await D.scalar(
-    "SELECT HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'ALTER') AS CanAlter");
+  const canAlter = await D.canManageSchema();
   if (!canAlter) {
     console.error('');
-    console.error('  ✖ У логина нет права менять структуру базы (ALTER).');
+    console.error('  ✖ У логина нет права менять структуру базы:');
+    console.error('    пробное CREATE PROCEDURE отклонено сервером.');
     console.error('');
     console.error('    Быстрое решение — выполнить в SSMS файл db\\grant-ddl.sql');
     console.error('    (или выдать право вручную, под администратором):');
