@@ -1,0 +1,212 @@
+#!/usr/bin/env node
+// Диагностика: почему сервер не может подключиться к SQL Server.
+// Проверяет то, что не видно из сообщения драйвера:
+//   * доступен ли порт 1433 по TCP (и по какому адресу);
+//   * какие службы SQL Server установлены и запущены;
+//   * какие экземпляры зарегистрированы (важно: SQLEXPRESS — именованный);
+//   * совпадают ли настройки окружения с найденным экземпляром.
+//
+// Запуск:  npm run sql:doctor     (в папке server)
+// Ничего не меняет — только читает и советует.
+'use strict';
+
+const net = require('node:net');
+const os = require('node:os');
+const { execFileSync } = require('node:child_process');
+
+const D = require('../db');
+
+const isWin = process.platform === 'win32';
+const HOST = (() => {
+  const s = String(D.CONFIG.server || D.SERVER || 'localhost');
+  return s.split(',')[0].split('\\')[0];
+})();
+const PORT = D.CONFIG.options?.port || 1433;
+const INSTANCE = D.CONFIG.options?.instanceName || '';
+
+const line = '─'.repeat(64);
+const ok = t => console.log('  ✔ ' + t);
+const bad = t => console.log('  ✖ ' + t);
+const info = t => console.log('    ' + t);
+
+function sh(cmd, args) {
+  try {
+    return execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000 });
+  } catch (e) {
+    return (e && e.stdout) ? String(e.stdout) : '';
+  }
+}
+
+/** TCP-проверка: отвечает ли порт. */
+function probe(host, port, ms = 3000) {
+  return new Promise(resolve => {
+    const sock = new net.Socket();
+    let done = false;
+    const finish = (result) => {
+      if (done) return;
+      done = true;
+      try { sock.destroy(); } catch { /* уже закрыт */ }
+      resolve(result);
+    };
+    sock.setTimeout(ms);
+    sock.once('connect', () => finish({ ok: true }));
+    sock.once('timeout', () => finish({ ok: false, reason: 'timeout' }));
+    sock.once('error', e => finish({ ok: false, reason: e.code || e.message }));
+    sock.connect(port, host);
+  });
+}
+
+/** Службы SQL Server из sc query (Windows). */
+function sqlServices() {
+  if (!isWin) return [];
+  const out = sh('sc', ['query', 'state=', 'all']);
+  const services = [];
+  let current = null;
+  for (const raw of out.split(/\r?\n/)) {
+    const l = raw.trim();
+    const m = l.match(/^SERVICE_NAME:\s*(\S+)/i);
+    if (m) {
+      current = { name: m[1], running: false };
+      if (/^MSSQL\$|^MSSQLSERVER$|^SQLAgent/i.test(current.name)) services.push(current);
+      else current = null;
+      continue;
+    }
+    if (current && /STATE\s*:\s*\d+\s+(\w+)/i.test(l)) {
+      current.running = /RUNNING/i.test(l);
+    }
+  }
+  return services.filter(s => /^MSSQL(SERVER|\$)/i.test(s.name));
+}
+
+/** Зарегистрированные экземпляры из реестра (Windows). */
+function registeredInstances() {
+  if (!isWin) return [];
+  const out = sh('reg', ['query', 'HKLM\\SOFTWARE\\Microsoft\\Microsoft SQL Server\\Instance Names\\SQL']);
+  const list = [];
+  for (const raw of out.split(/\r?\n/)) {
+    const m = raw.trim().match(/^([A-Za-z0-9_$]+)\s+REG_SZ\s+(.+)$/);
+    if (m) list.push({ name: m[1], id: m[2].trim() });
+  }
+  return list;
+}
+
+async function main() {
+  console.log(line);
+  console.log('  BankInvest — диагностика подключения к SQL Server');
+  console.log(line);
+  console.log('  Настройки сейчас:');
+  console.log(`    MSSQL_SERVER   : ${process.env.MSSQL_SERVER || '(не задан, по умолчанию localhost)'}`);
+  console.log(`    MSSQL_INSTANCE : ${process.env.MSSQL_INSTANCE || '(не задан)'}`);
+  console.log(`    MSSQL_DATABASE : ${D.DATABASE}`);
+  console.log(`    MSSQL_USER     : ${process.env.MSSQL_USER || '(не задан)'}`);
+  console.log(`    Пароль задан   : ${process.env.MSSQL_PASSWORD ? 'да' : 'НЕТ'}`);
+  console.log(`    Проверяем      : ${HOST}:${PORT}${INSTANCE ? ' (экземпляр ' + INSTANCE + ')' : ''}`);
+  console.log(line);
+
+  // ---------- 1. TCP ----------
+  console.log('  1) Порт — может ли Node.js вообще достучаться до SQL Server');
+  const attempts = [...new Set([HOST, '127.0.0.1', 'localhost'])];
+  let anyOpen = false;
+  for (const h of attempts) {
+    const r = await probe(h, PORT);
+    if (r.ok) { ok(`${h}:${PORT} — открыт`); anyOpen = true; }
+    else bad(`${h}:${PORT} — нет ответа (${r.reason})`);
+  }
+  if (!anyOpen) {
+    info('Порт закрыт: SQL Server не слушает 1433 или служба не запущена.');
+  }
+  console.log('');
+
+  // ---------- 2. Службы ----------
+  console.log('  2) Службы SQL Server');
+  if (!isWin) {
+    info('проверка служб доступна только на Windows');
+  } else {
+    const svc = sqlServices();
+    if (!svc.length) {
+      bad('службы SQL Server не найдены — похоже, он не установлен на этом компьютере');
+      info('установить: https://www.microsoft.com/sql-server/sql-server-downloads (Express)');
+    } else {
+      for (const s of svc) {
+        (s.running ? ok : bad)(`${s.name} — ${s.running ? 'работает' : 'ОСТАНОВЛЕНА'}`);
+      }
+      const stopped = svc.filter(s => !s.running);
+      if (stopped.length) {
+        info('запустить от администратора:');
+        for (const s of stopped) {
+          const nm = s.name.includes('$') ? `"${s.name}"` : s.name;
+          info(`  net start ${nm}`);
+        }
+      }
+    }
+  }
+  console.log('');
+
+  // ---------- 3. Экземпляры ----------
+  console.log('  3) Установленные экземпляры');
+  const inst = registeredInstances();
+  if (!isWin) {
+    info('проверка экземпляров доступна только на Windows');
+  } else if (!inst.length) {
+    bad('экземпляры не найдены в реестре');
+  } else {
+    for (const i of inst) ok(`${i.name}  (${i.id})`);
+    const named = inst.filter(i => i.name.toUpperCase() !== 'MSSQLSERVER');
+    if (named.length && !INSTANCE) {
+      const first = named[0].name;
+      bad(`найден именованный экземпляр «${first}», а MSSQL_INSTANCE не задан`);
+      info('для именованного экземпляра обычно нужна одна из настроек:');
+      info(`  setx MSSQL_INSTANCE ${first}`);
+      info('  либо (если включён TCP и известен порт, обычно динамический):');
+      info(`  setx MSSQL_SERVER "localhost\\\\${first}"`);
+      info('после setx закройте окно cmd и откройте новое');
+    }
+  }
+  console.log('');
+
+  // ---------- 4. Итог ----------
+  console.log(line);
+  console.log('  Что делать (по порядку)');
+  console.log(line);
+  if (!anyOpen) {
+    console.log('  Порт 1433 не отвечает — почти всегда одно из трёх:');
+    console.log('');
+    console.log('  а) служба SQL Server не запущена');
+    console.log('     Пуск → «Службы» → SQL Server (MSSQLSERVER) → Запустить');
+    console.log('     или от администратора: net start MSSQLSERVER');
+    console.log('     (для Express: net start "MSSQL$SQLEXPRESS")');
+    console.log('');
+    console.log('  б) выключен протокол TCP/IP (по умолчанию в Express он выключен!)');
+    console.log('     SQL Server Configuration Manager →');
+    console.log('       SQL Server Network Configuration → Protocols for MSSQLSERVER/EXPRESS');
+    console.log('       → TCP/IP: Enable → двойной клик → IP Addresses → IPAll:');
+    console.log('         TCP Port = 1433, TCP Dynamic Ports = пусто');
+    console.log('     затем перезапустить службу:');
+    console.log('       net stop MSSQLSERVER & net start MSSQLSERVER');
+    console.log('');
+    console.log('  в) сервер на другом порту или это именованный экземпляр');
+    console.log('     тогда укажите его явно:');
+    console.log('       setx MSSQL_INSTANCE SQLEXPRESS      (для Express)');
+    console.log('       setx MSSQL_SERVER "localhost,1433"  (другой порт)');
+    console.log('');
+    console.log('  Проверить порт вручную:');
+    console.log('       Test-NetConnection localhost -Port 1433');
+    console.log('     либо в PowerShell: Get-NetTCPConnection -LocalPort 1433');
+  } else {
+    console.log('  Порт открыт — значит проблема не в сети, а в доступе:');
+    console.log('    • неверный логин/пароль → setx MSSQL_PASSWORD "..." и новое окно cmd');
+    console.log('    • сервер в режиме «только Windows» → SSMS: Properties → Security →');
+    console.log('      SQL Server and Windows Authentication mode → перезапуск службы');
+    console.log('    • логин отключён → ALTER LOGIN sa ENABLE; (в SSMS под администратором)');
+    console.log('    • нет базы BankInvest → npm run db:init');
+  }
+  console.log(line);
+  console.log('  Ещё варианты, если SQL Server ставить не хочется:');
+  console.log('    docker compose up -d   (в корне проекта: база + сервер в контейнерах)');
+  console.log(line);
+}
+
+main().catch(e => {
+  console.error('  Ошибка диагностики: ' + (e && e.message));
+  process.exitCode = 1;
+});
