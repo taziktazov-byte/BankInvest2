@@ -17,6 +17,7 @@
 //   BANKINVEST_CONNECTION                — полная строка подключения (перекрывает всё выше)
 //   BANKINVEST_AUTO_SCHEMA    1          — при первом запуске выполнить db/schema.sql
 //   BANKINVEST_AUTO_SEED      1          — если база пустая, загрузить db/seed.sql
+//   BANKINVEST_AUTO_UPGRADE   1          — если в существующей базе не хватает таблиц, применить db/schema.sql
 'use strict';
 
 const path = require('node:path');
@@ -33,6 +34,13 @@ const INSTANCE = process.env.MSSQL_INSTANCE || '';
 const POOL_MAX = Number(process.env.MSSQL_POOL_MAX || 10);
 const AUTO_SCHEMA = String(process.env.BANKINVEST_AUTO_SCHEMA ?? '1') !== '0';
 const AUTO_SEED = String(process.env.BANKINVEST_AUTO_SEED ?? '1') !== '0';
+const AUTO_UPGRADE = String(process.env.BANKINVEST_AUTO_UPGRADE ?? '1') !== '0';
+
+// Таблицы, без которых сервер не работает. Sessions появилась позже
+// остальных — именно её чаще всего не хватает в базе, созданной раньше.
+const REQUIRED_TABLES = ['Clients', 'Users', 'DepoAccounts', 'Issuers', 'Securities', 'Holdings',
+  'Transactions', 'DepositCertificates', 'InvestmentProjects', 'AuditLog', 'PriceHistory',
+  'Listings', 'Sessions'];
 
 const boolEnv = (name, def) => {
   const v = process.env[name];
@@ -143,6 +151,15 @@ function sqlError(e) {
     return out;
   }
   if (e && e.number === 4060) { out.key = 'db.connect'; out.hint = `База «${DATABASE}» не найдена — создайте её или разрешите BANKINVEST_AUTO_SCHEMA`; return out; }
+  // 208 — таблицы нет: база старше текущей схемы (например, из .bak без Sessions).
+  if (e && (e.number === 208 || e.number === 207)) {
+    const m = String((e && e.message) || '').match(/['«“"]([A-Za-z_][A-Za-z0-9_.]*)['»”"]/);
+    out.key = 'db.noschema';
+    out.hint = `В базе «${DATABASE}» нет нужной таблицы или столбца${m ? ` (${m[1]})` : ''} — `
+      + 'она создана до текущей схемы. Выполните: npm run db:init '
+      + '(или откройте db/schema.sql в SSMS и нажмите F5).';
+    return out;
+  }
   // 229/262/230 — нет прав; 15151 — нет права на изменение объекта
   if (e && (e.number === 229 || e.number === 262 || e.number === 230 || e.number === 15151)) {
     out.key = 'db.permission';
@@ -404,11 +421,29 @@ async function runScript(script, label) {
 async function init() {
   await ensurePool();
   let fresh = false;
-  if (!(await scalar("SELECT OBJECT_ID('Clients','U')"))) {
+  const hasClients = !!(await scalar("SELECT OBJECT_ID('Clients','U')"));
+  if (!hasClients) {
     if (!AUTO_SCHEMA) {
       throw new ApiError('db.noschema', 500);
     }
     await runScript(readSqlFile('schema.sql'), 'schema');
+  } else if (AUTO_SCHEMA) {
+    // База уже есть — возможно, она старше текущего schema.sql (например,
+    // восстановлена из .bak и в ней нет Sessions). schema.sql идемпотентен:
+    // CREATE только при отсутствии объекта, процедуры пересоздаются.
+    // Без этого сервер падал на первом же SELECT из Sessions.
+    const missing = [];
+    for (const t of REQUIRED_TABLES) {
+      const id = await scalar('SELECT OBJECT_ID(?, \'U\')', t);
+      if (!id) missing.push(t);
+    }
+    if (missing.length) {
+      if (!AUTO_UPGRADE) {
+        throw new ApiError('db.noschema', 500, `Нет таблиц: ${missing.join(', ')}. `
+          + 'Выполните db/schema.sql или разрешите BANKINVEST_AUTO_UPGRADE=1');
+      }
+      await runScript(readSqlFile('schema.sql'), 'schema');
+    }
   }
   const empty = Number(await scalar('SELECT COUNT(*) FROM Clients')) === 0;
   if (empty) {
