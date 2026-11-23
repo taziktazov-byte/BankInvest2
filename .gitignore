@@ -8,3 +8,8 @@ Obj/
 bin/
 obj/
 .vs/
+
+# локальные настройки подключения к SQL Server (пароли не храним в репозитории)
+.env
+.env.local
+server/.env

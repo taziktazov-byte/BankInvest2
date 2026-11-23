@@ -2,16 +2,20 @@
   "name": "bankinvest-server",
   "version": "1.0.0",
   "private": true,
-  "description": "Единый сервер для веб-версии и десктопной версии BankInvest (REST API + веб-приложение)",
+  "description": "Единый сервер для веб-версии и десктопной версии BankInvest: REST API + веб-приложение + Microsoft SQL Server",
   "main": "src/server.js",
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=18.0.0"
   },
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "reset-db": "node -e \"const fs=require('fs'),p=require('path');const d=process.env.BANKINVEST_DATA||p.join(__dirname,'data');for(const f of ['bankinvest.db','bankinvest.db-wal','bankinvest.db-shm'])try{fs.unlinkSync(p.join(d,f))}catch{};console.log('База данных удалена, при следующем запуске будет создана заново с демо-данными.')\"",
+    "db:check": "node src/tools/db-check.js",
+    "db:init": "node src/tools/db-init.js",
     "test": "node --test test/*.test.js"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "mssql": "^12.8.1"
+  }
 }

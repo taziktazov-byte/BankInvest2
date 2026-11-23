@@ -5,15 +5,39 @@ cd /d "%~dp0"
 
 where node >nul 2>nul
 if errorlevel 1 (
-  echo Не найден Node.js. Установите Node.js 22.5 или новее: https://nodejs.org
+  echo Не найден Node.js. Установите Node.js 18 или новее: https://nodejs.org
   pause
   exit /b 1
 )
 
-echo [1/3] Запускаю сервер (веб-версия + API)...
+if not exist "server\node_modules\mssql" (
+  echo [0/3] Устанавливаю драйвер SQL Server ^(npm install^)...
+  pushd server
+  call npm.cmd install --no-audit --no-fund
+  popd
+  if errorlevel 1 (
+    echo Не удалось установить пакет mssql. Выполните вручную: cd server ^&^& npm.cmd install
+    pause
+    exit /b 1
+  )
+)
+
+echo [1/3] Проверяю SQL Server...
+pushd server
+node src\tools\db-check.js
+popd
+if errorlevel 1 (
+  echo.
+  echo Подключение к SQL Server не удалось - сервер не запустится.
+  echo Проверьте службу SQL Server, TCP/IP ^(порт 1433^) и переменные MSSQL_USER / MSSQL_PASSWORD.
+  pause
+  exit /b 1
+)
+
+echo [2/3] Запускаю сервер (веб-версия + API)...
 start "BankInvest server" cmd /c "cd /d %~dp0server && node src\server.js"
 
-echo [2/3] Жду готовности сервера...
+echo [3/3] Жду готовности сервера...
 set /a tries=0
 :wait
 set /a tries+=1
@@ -28,7 +52,7 @@ if errorlevel 1 (
   goto wait
 )
 
-echo [3/3] Открываю веб-версию в браузере...
+echo Открываю веб-версию в браузере...
 start "" http://localhost:8787/
 
 echo.
