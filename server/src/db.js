@@ -482,8 +482,31 @@ async function audit(login, action, details = '') {
   } catch { /* журнал не должен ломать операцию */ }
 }
 
+/**
+ * Может ли текущий логин менять структуру базы (создавать таблицы, пересоздавать
+ * процедуры)? Проверяем ДЕЛОМ, а не через HAS_PERMS_BY_NAME: роль db_ddladmin
+ * не даёт ровно разрешение 'ALTER' на уровне базы, но DDL выполнять позволяет —
+ * HAS_PERMS_BY_NAME в этом случае отвечает 0 и вводит в заблуждение.
+ *
+ * Пробуем создать временную процедуру в отдельной транзакции и откатываем её.
+ * Временная процедура (#имя) не попадает в базу, но право CREATE PROCEDURE
+ * всё равно проверяется.
+ */
+async function canManageSchema() {
+  const tr = await ensurePool().then(p => p.transaction());
+  await tr.begin();
+  try {
+    await tr.request().query('CREATE PROCEDURE #CanManageSchemaProbe AS SELECT 1');
+    await tr.rollback();
+    return true;
+  } catch {
+    try { await tr.rollback(); } catch { /* уже откачена */ }
+    return false;
+  }
+}
+
 module.exports = {
-  sql, ensurePool, closePool, init, updatePrices, audit,
+  sql, ensurePool, closePool, init, updatePrices, audit, canManageSchema,
   query, all, get, scalar, run, exec, tx,
   hash, now, toIso, err, ApiError, describeError,
   toObjects, firstRows, namedParams,   // экспортируются для тестов
