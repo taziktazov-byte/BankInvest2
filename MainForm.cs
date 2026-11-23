@@ -215,21 +215,53 @@ public class MainForm : Form
     {
         var d = Api.Get("/portfolio" + (Session.IsStaff ? "?clientId=" + CurClient : ""));
         var t = Api.Table(d["rows"]!);
+
+        // Пустой портфель: сервер отдаёт [], и Api.ToTable() возвращает таблицу БЕЗ колонок.
+        // Раньше код ниже обращался к grid.Columns["Qty"] — null -> NullReferenceException.
+        // Поэтому для пустого портфеля создаём колонки с нужными типами вручную.
+        if (t.Columns.Count == 0) FillEmptyPortfolio(t);
+
         // порядок столбцов — как в исходном приложении
         var order = new[] { "Id", "Symbol", "Name", "Segment", "Qty", "ForSale", "Price", "ExpenseRatio", "CurrentValue", "CurrentPct", "TargetValue", "TargetPct", "Amount" };
         for (int i = 0; i < order.Length; i++) if (t.Columns.Contains(order[i])) t.Columns[order[i]]!.SetOrdinal(i);
         Bind(t);
         foreach (DataGridViewColumn c in grid.Columns) c.ReadOnly = c.Name != "TargetPct";
-        grid.Columns["Qty"]!.FillWeight = 45; grid.Columns["ForSale"]!.FillWeight = 55; grid.Columns["Price"]!.FillWeight = 55;
-        grid.Columns["Segment"]!.FillWeight = 70; grid.Columns["Name"]!.FillWeight = 130;
+        Weight("Qty", 45); Weight("ForSale", 55); Weight("Price", 55);
+        Weight("Segment", 70); Weight("Name", 130);
         grid.ReadOnly = false;
         totalLbl.Visible = true;
         Recalc();
     }
 
+    // Колонки портфеля для пустой таблицы: без них Recalc() и оформление сетки падают.
+    static void FillEmptyPortfolio(DataTable t)
+    {
+        t.Columns.Add("Id", typeof(int));
+        t.Columns.Add("Symbol", typeof(string));
+        t.Columns.Add("Name", typeof(string));
+        t.Columns.Add("Segment", typeof(string));
+        t.Columns.Add("Qty", typeof(decimal));
+        t.Columns.Add("ForSale", typeof(decimal));
+        t.Columns.Add("Price", typeof(decimal));
+        t.Columns.Add("ExpenseRatio", typeof(decimal));
+        t.Columns.Add("CurrentValue", typeof(decimal));
+        t.Columns.Add("CurrentPct", typeof(decimal));
+        t.Columns.Add("TargetValue", typeof(decimal));
+        t.Columns.Add("TargetPct", typeof(decimal));
+        t.Columns.Add("Amount", typeof(decimal));
+    }
+
+    // Ширина колонки, если колонка вообще есть в текущей таблице.
+    void Weight(string name, float w)
+    {
+        if (grid.Columns.Contains(name)) grid.Columns[name]!.FillWeight = w;
+    }
+
     void Recalc()
     {
         if (grid.DataSource is not DataTable t) return;
+        // без колонок считать нечего (например, портфель пуст и колонки не созданы)
+        if (!t.Columns.Contains("CurrentValue") || !t.Columns.Contains("TargetPct")) return;
         grid.EndEdit();
         decimal tot = t.AsEnumerable().Sum(r => r.Field<decimal>("CurrentValue"));
         foreach (DataRow r in t.Rows)
