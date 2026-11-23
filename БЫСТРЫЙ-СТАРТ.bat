@@ -15,15 +15,12 @@ echo (обычно это пользователь sa).
 echo.
 
 rem ---------- 1. Проверка Node.js ----------
-where node >nul 2>nul
+call "%~dp0tools\_find-node.bat"
 if errorlevel 1 (
-  echo [!] Не найден Node.js.
-  echo     Установите Node.js 18 или новее: https://nodejs.org
-  echo     ^(галочка "Add to PATH" при установке^), затем запустите этот файл снова.
   pause
   exit /b 1
 )
-for /f "delims=" %%v in ('node -v') do echo [1/5] Node.js: %%v
+for /f "delims=" %%v in ('node -v') do echo [1/5] Node.js: %%v  [%NODE_EXE%]
 
 rem ---------- 2. Драйвер SQL Server ----------
 if exist "server\node_modules\mssql" (
@@ -31,7 +28,7 @@ if exist "server\node_modules\mssql" (
 ) else (
   echo [2/5] Устанавливаю драйвер SQL Server ^(npm install^)...
   pushd server
-  call npm.cmd install --no-audit --no-fund
+  call "%NPM_CMD%" install --no-audit --no-fund
   popd
   if errorlevel 1 (
     echo [!] Не удалось установить пакет mssql.

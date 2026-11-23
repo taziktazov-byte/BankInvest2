@@ -1,11 +1,10 @@
-@echo off
+﻿@echo off
 chcp 65001 >nul
 title BankInvest - все версии
 cd /d "%~dp0"
 
-where node >nul 2>nul
+call "%~dp0tools\_find-node.bat"
 if errorlevel 1 (
-  echo Не найден Node.js. Установите Node.js 18 или новее: https://nodejs.org
   pause
   exit /b 1
 )
@@ -13,7 +12,7 @@ if errorlevel 1 (
 if not exist "server\node_modules\mssql" (
   echo [0/3] Устанавливаю драйвер SQL Server ^(npm install^)...
   pushd server
-  call npm.cmd install --no-audit --no-fund
+  call "%NPM_CMD%" install --no-audit --no-fund
   popd
   if errorlevel 1 (
     echo Не удалось установить пакет mssql. Выполните вручную: cd server ^&^& npm.cmd install
