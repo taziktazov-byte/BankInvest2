@@ -122,6 +122,22 @@ function tcpSettings() {
   return out;
 }
 
+/**
+ * Режим проверки подлинности из реестра: LoginMode 1 = только Windows,
+ * 2 = смешанный (SQL-логины разрешены). Ключ лежит в ветке экземпляра.
+ */
+function loginMode() {
+  if (!isWin) return [];
+  const out = [];
+  for (const inst of registeredInstances()) {
+    const raw = sh('reg', ['query',
+      `HKLM\\SOFTWARE\\Microsoft\\Microsoft SQL Server\\${inst.id}\\MSSQLServer`, '/v', 'LoginMode']);
+    const m = raw.match(/LoginMode\s+REG_DWORD\s+0x([0-9a-f]+)/i);
+    out.push({ name: inst.name, mode: m ? parseInt(m[1], 16) : null });
+  }
+  return out;
+}
+
 async function main() {
   console.log(line);
   console.log('  BankInvest — диагностика подключения к SQL Server');
@@ -227,6 +243,28 @@ async function main() {
   }
   console.log('');
 
+  // ---------- 3c. Режим аутентификации ----------
+  console.log('  5) Режим проверки подлинности');
+  const modes = loginMode();
+  if (!isWin) {
+    info('проверка доступна только на Windows');
+  } else if (!modes.length) {
+    info('не удалось прочитать настройки');
+  } else {
+    for (const m of modes) {
+      if (m.mode === 1) {
+        bad(`${m.name}: только Windows-вход (LoginMode=1) — логин sa не примут`);
+        info('SSMS → правой кнопкой по серверу → Свойства → Безопасность →');
+        info('  «Режим проверки подлинности SQL Server и Windows» → перезапуск службы');
+      } else if (m.mode === 2) {
+        ok(`${m.name}: смешанный режим — SQL-логины разрешены`);
+      } else {
+        info(`${m.name}: LoginMode=${m.mode ?? 'не прочитан'}`);
+      }
+    }
+  }
+  console.log('');
+
   // ---------- 4. Итог ----------
   console.log(line);
   console.log('  Что делать (по порядку)');
@@ -256,12 +294,23 @@ async function main() {
     console.log('       Test-NetConnection localhost -Port 1433');
     console.log('     либо в PowerShell: Get-NetTCPConnection -LocalPort 1433');
   } else {
-    console.log('  Порт открыт — значит проблема не в сети, а в доступе:');
-    console.log('    • неверный логин/пароль → setx MSSQL_PASSWORD "..." и новое окно cmd');
-    console.log('    • сервер в режиме «только Windows» → SSMS: Properties → Security →');
-    console.log('      SQL Server and Windows Authentication mode → перезапуск службы');
-    console.log('    • логин отключён → ALTER LOGIN sa ENABLE; (в SSMS под администратором)');
-    console.log('    • нет базы BankInvest → npm run db:init');
+    console.log('  Порт открыт — значит сеть в порядке, дело в самом входе:');
+    console.log('    • ошибка ELOGIN / 18456 = «Login failed» — это НЕ сеть и НЕ TCP/IP;');
+    console.log('    • причина 1: сервер в режиме «только Windows» (см. пункт 5 выше);');
+    console.log('    • причина 2: неверный пароль или логин отключён;');
+    console.log('    • причина 3: логина ещё нет в базе.');
+    console.log('');
+    console.log('  Готовое решение — файл db\\create-app-login.sql:');
+    console.log('    откройте его в SSMS (под администратором) и нажмите «Выполнить»:');
+    console.log('    создаст логин bankinvest / BankInvest!2026, включит смешанный');
+    console.log('    режим и выдаст права. Затем перезапустите службу и задайте:');
+    console.log('      setx MSSQL_USER bankinvest');
+    console.log('      setx MSSQL_PASSWORD "BankInvest!2026"');
+    console.log('    (новое окно cmd после setx)');
+    console.log('');
+    console.log('  Другие частые причины:');
+    console.log('    • логин отключён → в SSMS: ALTER LOGIN bankinvest ENABLE;');
+    console.log('    • базы нет → npm run db:init');
   }
   console.log('  Проверить прямо в SSMS (New Query) — какой вход работает:');
   console.log('     SELECT @@SERVERNAME AS Сервер, SUSER_NAME() AS Вход,');

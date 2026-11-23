@@ -119,13 +119,30 @@ function sqlError(e) {
   out.cause = e;
   out.dbNumber = e && (e.number || e.code);
   out.dbMessage = String((e && e.message) || e);
-  if (['ELOGIN', 'ELOGINFAILED', 'ESOCKET', 'ECONNCLOSED', 'ETIMEOUT', 'ENOTFOUND', 'ECONNREFUSED', 'EINSTLOOKUP'].includes(String(e && e.code))) {
+  // Вход отклонён сервером: сеть в порядке, дело в логине/пароле/режиме.
+  // ВАЖНО: проверяем раньше сетевых кодов — иначе «неверный пароль» выглядит
+  // как «нет связи», и человек правит TCP/IP, который уже настроен.
+  const loginFailure = ['ELOGIN', 'ELOGINFAILED', 'ENOTOPEN'].includes(String(e && e.code))
+    || (e && e.number === 18456);
+  if (loginFailure) {
+    out.key = 'db.login';
+    const who = USER || 'Windows-пользователь';
+    const text = String((e && e.message) || '');
+    const windowsOnly = /Windows authentication only|только проверк|толькі праверк/i.test(text);
+    out.hint = windowsOnly
+      ? `SQL Server настроен «только Windows-вход» — SQL-логин «${who}» принять нельзя. `
+        + 'Включите смешанный режим: SSMS → правой кнопкой по серверу → Свойства → '
+        + 'Безопасность → «Режим проверки подлинности SQL Server и Windows» → перезапуск службы.'
+      : `Сервер доступен, но вход отклонён: «${who}». Проверьте MSSQL_USER / MSSQL_PASSWORD `
+        + 'и что логин включён (ALTER LOGIN ... ENABLE). Подробнее: npm run sql:doctor';
+    return out;
+  }
+  if (['ESOCKET', 'ECONNCLOSED', 'ETIMEOUT', 'ENOTFOUND', 'ECONNREFUSED', 'EINSTLOOKUP'].includes(String(e && e.code))) {
     out.key = 'db.connect';
     out.hint = `Сервер не отвечает: ${DB_FILE}. Проверьте службу SQL Server и TCP/IP (порт 1433).`;
     return out;
   }
   if (e && e.number === 4060) { out.key = 'db.connect'; out.hint = `База «${DATABASE}» не найдена — создайте её или разрешите BANKINVEST_AUTO_SCHEMA`; return out; }
-  if (e && e.number === 18456) { out.key = 'db.login'; out.hint = `Пользователь «${USER || 'Windows'}» не прошёл проверку подлинности (MSSQL_USER / MSSQL_PASSWORD)`; return out; }
   // 229/262/230 — нет прав; 15151 — нет права на изменение объекта
   if (e && (e.number === 229 || e.number === 262 || e.number === 230 || e.number === 15151)) {
     out.key = 'db.permission';
