@@ -157,6 +157,16 @@ GO
 ALTER ROLE db_ddladmin ADD MEMBER bankinvest;
 ```
 
+Право на вызов процедур выдаёт сам `db\schema.sql` (раздел 8). Если процедуры создавались
+вручную, выдайте его отдельно — иначе кнопка «Купить» не работает, а в `sys.procedures`
+процедуры не видны (SQL Server скрывает объекты, на которые у логина нет прав):
+
+```sql
+USE BankInvest;
+GRANT EXECUTE ON OBJECT::dbo.usp_BuyListing   TO bankinvest;
+GRANT EXECUTE ON OBJECT::dbo.usp_UpdatePrices TO bankinvest;
+```
+
 Windows, PowerShell:
 
 ```powershell

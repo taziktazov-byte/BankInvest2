@@ -301,7 +301,19 @@ BEGIN
 END
 GO
 
-/* Отзыв предложения: UPDATE в сервERE не требует курсора,
+/* Отзыв предложения: UPDATE в сервере не требует курсора,
    поэтому отдельной процедуры нет — используется UPDATE + @@ROWCOUNT. */
+
+/* ---------------- 8. Права на процедуры для логина приложения ----------------
+   Без EXECUTE логин приложения не может ни вызвать процедуру, ни увидеть её
+   в sys.procedures / sys.objects (SQL Server скрывает объекты без прав).
+   Пользователь базы создаётся отдельно (см. README_RU.md), поэтому под проверкой. */
+IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = 'bankinvest' AND type IN ('S','U'))
+BEGIN
+  GRANT EXECUTE ON OBJECT::dbo.usp_UpdatePrices TO bankinvest;
+  GRANT EXECUTE ON OBJECT::dbo.usp_BuyListing   TO bankinvest;
+END
+GO
+
 PRINT N'BankInvest: схема готова';
 GO
