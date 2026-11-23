@@ -97,15 +97,20 @@ GO
 
 Если базы нет, есть два равнозначных пути:
 
-**Способ А — скриптами в SSMS** (как вы делали раньше):
+**Способ А — скриптами в SSMS** (как вы делали раньше): откройте и выполните по очереди
+`db\schema.sql`, затем `db\seed.sql`. Выбирать базу в списке сверху **не нужно** — файлы
+сами делают `USE BankInvest`, а `schema.sql` ещё и создаёт базу, если её нет:
 
 ```sql
-CREATE DATABASE BankInvest;
+-- так выглядит начало db\schema.sql (это уже внутри файла)
+IF DB_ID('BankInvest') IS NULL CREATE DATABASE BankInvest;
 GO
--- затем открыть и выполнить по очереди:
---   db\schema.sql   (таблицы + usp_BuyListing, usp_UpdatePrices)
---   db\seed.sql     (демо-данные и учётные записи)
+USE BankInvest;
+GO
 ```
+
+`schema.sql` пересоздаёт процедуры через `DROP PROCEDURE` + `CREATE PROCEDURE`, поэтому
+работает на любой версии SQL Server (включая 2014 и старше) и его можно запускать повторно.
 
 **Способ Б — дать серверу сделать всё самому:** просто запустите его (шаг 3) — при первом старте
 он выполнит `db/schema.sql`, а если база пустая, то и `db/seed.sql`.
@@ -118,13 +123,39 @@ GO
 |---|---|---|
 | `MSSQL_SERVER` | `localhost` | хост, можно с портом: `localhost,1433`; для именованного экземпляра — `MSSQL_INSTANCE=SQLEXPRESS` |
 | `MSSQL_DATABASE` | `BankInvest` | имя базы |
-| `MSSQL_USER` | — | SQL-логин (`bankinvest`). Не задан → Windows-аутентификация |
+| `MSSQL_USER` | — | SQL-логин приложения (`bankinvest`). Для локального SQL Server задайте обязательно вместе с `MSSQL_PASSWORD` |
 | `MSSQL_PASSWORD` | — | пароль логина |
 | `MSSQL_ENCRYPT` | `false` | `true`, если сервер требует шифрование |
 | `MSSQL_TRUST_CERT` | `true` | доверять самоподписанному сертификату |
 | `BANKINVEST_CONNECTION` | — | полная строка подключения, перекрывает всё выше |
 | `BANKINVEST_AUTO_SCHEMA` | `1` | `0` — не создавать таблицы автоматически |
 | `BANKINVEST_AUTO_SEED` | `1` | `0` — не заливать демо-данные в пустую базу |
+
+Логин приложения создаётся в SSMS один раз (в базе `master`, под администратором):
+
+```sql
+CREATE LOGIN bankinvest WITH PASSWORD = N'ВашНадёжныйПароль', CHECK_POLICY = OFF;
+GO
+USE BankInvest;
+GO
+CREATE USER bankinvest FOR LOGIN bankinvest;
+ALTER ROLE db_datareader ADD MEMBER bankinvest;
+ALTER ROLE db_datawriter ADD MEMBER bankinvest;
+```
+
+Если логин уже существует (ошибка 15025 «уже существует»), смените пароль вместо создания:
+
+```sql
+ALTER LOGIN bankinvest WITH PASSWORD = N'ВашНадёжныйПароль';
+GO
+```
+
+Для изменения процедур при автосоздании схемы логину нужна ещё роль `db_ddladmin`
+(если схему вы создаёте в SSMS вручную — не нужна):
+
+```sql
+ALTER ROLE db_ddladmin ADD MEMBER bankinvest;
+```
 
 Windows, PowerShell:
 

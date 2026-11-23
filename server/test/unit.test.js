@@ -132,3 +132,45 @@ test('текст ошибки процедуры SQL Server превращает
   const map = { ERR_NOLISTING: 'e.nolisting', ERR_OWN: 'e.own', ERR_QTY: 'e.qty', ERR_ACC: 'e.noaccount', ERR_SELLERQTY: 'e.sellerqty' };
   assert.equal(Object.entries(map).find(([code]) => fake.message.includes(code))[1], 'e.own');
 });
+
+// --- формат, в котором драйвер mssql реально возвращает строки ---
+// Регрессия: раньше код ждал { rows: [...] }, драйвер отдаёт массив объектов,
+// из-за чего ВСЕ запросы выглядели пустыми («таблицы не найдены», «Сервер: null»).
+test('результат запроса: массив объектов (обычный режим mssql)', () => {
+  const raw = [{ name: 'Clients' }, { name: 'Users' }];
+  assert.deepEqual(D.toObjects(raw), [{ name: 'Clients' }, { name: 'Users' }]);
+  // именно эта проверка раньше ломалась: сервер отвечал «объекта нет»
+  assert.equal(D.toObjects([{ Id: 42, name: 'usp_BuyListing' }])[0].Id, 42);
+  assert.deepEqual(D.toObjects([]), []);
+  assert.deepEqual(D.toObjects(null), []);
+  assert.deepEqual(D.toObjects(undefined), []);
+});
+
+test('результат запроса: { rows, columns } (режим arrayRowMode)', () => {
+  const raw = { rows: [[1, 'Альфа'], [2, 'Бета']], columns: [{ name: 'Id' }, { name: 'Name' }] };
+  assert.deepEqual(D.toObjects(raw), [{ Id: 1, Name: 'Альфа' }, { Id: 2, Name: 'Бета' }]);
+});
+
+test('результат запроса: скаляр и дата не превращаются в пустоту', () => {
+  assert.deepEqual(D.toObjects([{ v: 13 }]), [{ v: 13 }]);
+  const row = D.toObjects([{ '': 'Microsoft SQL Server 2025' }])[0];
+  assert.equal(Object.values(row)[0], 'Microsoft SQL Server 2025');
+});
+
+test('firstRows: берёт recordset, а если он пуст — следующий непустой', () => {
+  assert.deepEqual(D.firstRows({ recordset: [{ a: 1 }] }), [{ a: 1 }]);
+  assert.deepEqual(D.firstRows({ recordset: [], recordsets: [[], [{ a: 2 }]] }), [{ a: 2 }]);
+  assert.deepEqual(D.firstRows({ recordset: [], recordsets: [[]] }), []);
+  assert.deepEqual(D.firstRows(null), []);
+});
+
+test('describeError: номер и текст ошибки SQL Server не теряются', () => {
+  const e = D.err('db.error', 500);
+  e.dbNumber = 229;
+  e.dbMessage = "The EXECUTE permission was denied on the object 'Clients'";
+  e.cause = { number: 229, lineNumber: 12, message: 'denied' };
+  const text = D.describeError(e);
+  assert.match(text, /229/);
+  assert.match(text, /EXECUTE permission/);
+  assert.match(text, /строка 12/);
+});

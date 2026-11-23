@@ -16,6 +16,11 @@
 SET NOCOUNT ON;
 GO
 
+/* Работаем в базе BankInvest — той же, что открывает schema.sql,
+   поэтому файл можно запускать из SSMS (F5) без выбора базы в списке. */
+USE BankInvest;
+GO
+
 /* ---------------- 1. Клиенты ---------------- */
 IF NOT EXISTS (SELECT 1 FROM Clients)
 INSERT Clients(Name,UNP,Address,Contacts) VALUES
