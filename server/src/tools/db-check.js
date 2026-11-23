@@ -45,6 +45,13 @@ async function main() {
   if (missing.length) {
     problems++;
     console.log('  Таблицы      : НЕ НАЙДЕНЫ: ' + missing.join(', '));
+    // Частый случай: база восстановлена из старого .bak, где Sessions ещё не было.
+    // schema.sql идемпотентен, поэтому просто применяем его целиком.
+    if (missing.includes('Sessions') && missing.length === 1) {
+      console.log('  Что значит    : база создана до появления таблицы Sessions —');
+      console.log('                  её использует общий сервер для входа по токену.');
+      console.log('                  Данные не пострадают, добавятся только недостающие объекты.');
+    }
     console.log('  Что сделать   : npm run db:init  (или откройте db/schema.sql в SSMS'
       + ' — файл сам выбирает базу ' + D.DATABASE + ')');
   } else {

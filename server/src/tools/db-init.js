@@ -36,6 +36,9 @@ async function main() {
   await D.ensurePool();
   console.log('  ✔ соединение установлено');
 
+  // schema.sql идемпотентен: недостающие таблицы создаст, существующие не тронет,
+  // процедуры пересоздаст. Поэтому применяем всегда — так база, восстановленная
+  // из старого .bak, догоняется до текущей версии (например, появляется Sessions).
   await runScript('schema.sql');
 
   const clients = Number(await D.scalar('SELECT COUNT(*) FROM Clients'));
