@@ -79,9 +79,32 @@ async function ensurePool() {
     await pool.connect();
   } catch (e) {
     pool = null;
+    // Базы может не быть (свежий SQL Server, контейнер Docker): создаём её в master
+    // и повторяем подключение. schema.sql создаёт только таблицы, не саму базу.
+    if (e && e.number === 4060 && (USER || process.env.BANKINVEST_CREATE_DB !== '0')) {
+      await createDatabase(e);
+      return ensurePool();
+    }
     throw sqlError(e);
   }
   return pool;
+}
+
+/** Создать пустую базу DATABASE, если её ещё нет (подключение через master). */
+async function createDatabase(originalError) {
+  const master = Object.assign({}, CONFIG, { database: 'master' });
+  let probe = null;
+  try {
+    probe = new sql.ConnectionPool(master);
+    await probe.connect();
+    await probe.request().query(
+      `IF DB_ID(N'${String(DATABASE).replace(/'/g, "''")}') IS NULL CREATE DATABASE [${String(DATABASE).replace(/]/g, ']]')}];`);
+  } catch (e) {
+    // нет прав dbcreator или базы правда нет иными причинами — сообщаем исходную ошибку
+    throw sqlError(originalError);
+  } finally {
+    if (probe) { try { await probe.close(); } catch { /* уже закрыт */ } }
+  }
 }
 
 async function closePool() {
