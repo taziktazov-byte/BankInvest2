@@ -18,6 +18,7 @@ public static class Loc
         if (l == Lang) return;
         Lang = l;
         try { Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!); File.WriteAllText(FilePath, l.ToString()); } catch { }
+        Api.SetLang(l);   // язык запоминается в сессии на сервере: так он одинаков в веб-версии и в приложении
         Changed?.Invoke();
     }
 
@@ -50,6 +51,12 @@ public static class Loc
         ["btn.register"] = X("Регистрация", "Register", "Рэгістрацыя"),
         ["login.fail"] = X("Неверные данные для входа.", "Invalid login details.", "Няправільныя даныя для ўваходу."),
         ["err.db"] = X("Ошибка подключения к БД:", "Database connection error:", "Памылка падключэння да БД:"),
+        // --- сервер
+        ["srv.title"] = X("Сервер BankInvest", "BankInvest server", "Сервер BankInvest"),
+        ["srv.url"] = X("Адрес сервера (API)", "Server address (API)", "Адрас сервера (API)"),
+        ["srv.fail"] = X("Не удалось подключиться к серверу.", "Could not connect to the server.", "Не ўдалося падключыцца да сервера."),
+        ["srv.hint"] = X("Запустите сервер: в папке server выполните «npm start» (нужен Node.js 22+).\nЗатем нажмите OK.", "Start the server: in the server folder run «npm start» (Node.js 22+ required).\nThen press OK.", "Запусціце сервер: у папцы server выканайце «npm start» (патрэбен Node.js 22+).\nЗатым націсніце OK."),
+        ["srv.current"] = X("Сервер:", "Server:", "Сервер:"),
         // --- регистрация ---
         ["reg.title"] = X("Регистрация", "Registration", "Рэгістрацыя"),
         ["reg.type"] = X("Тип аккаунта", "Account type", "Тып акаўнта"),

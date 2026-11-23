@@ -98,44 +98,31 @@ public class RegisterForm : Form
             string pass = rows.First(r => r.Key == "pass").T.Text, pass2 = rows.First(r => r.Key == "pass2").T.Text;
             if (name == "" || pass == "") throw new Exception(T("reg.e.empty"));
             if (pass != pass2 || pass.Length < 6) throw new Exception(T("reg.e.pass"));
-            string h = Db.Hash(pass);
 
+            // Проверки (УНП, уникальность, длина логина) выполняет сервер — правила одинаковы для веб и десктопа
+            var body = new Dictionary<string, object>
+            {
+                ["kind"] = comp ? "company" : "personal",
+                ["name"] = name, ["address"] = addr, ["contacts"] = contacts,
+                ["password"] = pass, ["password2"] = pass2,
+            };
             if (comp)
             {
                 string unp = V("unp");
                 if (!Regex.IsMatch(unp, @"^\d{9}$")) throw new Exception(T("reg.e.unp"));
-                if (Db.Scalar("SELECT 1 FROM Clients WHERE UNP=@u", "@u", unp) != null ||
-                    Db.Scalar("SELECT 1 FROM Users WHERE CompanyId=@u", "@u", unp) != null) throw new Exception(T("reg.e.exists"));
-                Db.Exec(@"SET XACT_ABORT ON; BEGIN TRAN;
-                          INSERT Clients(Name,UNP,Address,Contacts,Kind) VALUES(@n,@u,@a,@c,'Company');
-                          DECLARE @id INT = SCOPE_IDENTITY();
-                          INSERT DepoAccounts(ClientId,Number) VALUES(@id,'DEPO-'+@u);
-                          INSERT Users(CompanyId,Login,PasswordHash,Role,ClientId) VALUES(@u,@u,@h,'Client',@id);
-                          COMMIT;", "@n", name, "@u", unp, "@a", addr, "@c", contacts, "@h", h);
-                NewId = unp;
+                body["unp"] = unp;
             }
             else
             {
                 string login = V("login");
-                if (login == "" ) throw new Exception(T("reg.e.empty"));
+                if (login == "") throw new Exception(T("reg.e.empty"));
                 if (login.Length < 3) throw new Exception(T("reg.e.login"));
-                if (Db.Scalar("SELECT 1 FROM Users WHERE Login=@l AND CompanyId IN ('ASB','PERSONAL')", "@l", login) != null)
-                    throw new Exception(T("reg.e.exists"));
-                // служебный уникальный 9-значный номер (колонка UNP обязательна в БД; для физлиц наружу не показывается)
-                string unp;
-                do { unp = "9" + Random.Shared.Next(0, 100000000).ToString("D8"); }
-                while (Db.Scalar("SELECT 1 FROM Clients WHERE UNP=@u", "@u", unp) != null);
-                Db.Exec(@"SET XACT_ABORT ON; BEGIN TRAN;
-                          INSERT Clients(Name,UNP,Address,Contacts,Kind) VALUES(@n,@u,@a,@c,'Personal');
-                          DECLARE @id INT = SCOPE_IDENTITY();
-                          INSERT DepoAccounts(ClientId,Number) VALUES(@id,'DEPO-'+@u);
-                          INSERT Users(CompanyId,Login,PasswordHash,Role,ClientId) VALUES('PERSONAL',@l,@h,'Client',@id);
-                          COMMIT;", "@n", name, "@u", unp, "@a", addr, "@c", contacts, "@l", login, "@h", h);
-                NewId = login;
+                body["login"] = login;
             }
+
+            var res = Api.Post("/auth/register", body);
+            NewId = res["login"]?.ToString();
             NewCompany = comp;
-            Session.Login = NewId;
-            Db.Audit("Регистрация", comp ? "Company" : "Personal");
             MessageBox.Show(T("reg.ok"));
             DialogResult = DialogResult.OK;
         }

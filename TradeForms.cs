@@ -60,8 +60,11 @@ public class BuyForm : Form
         Dlg.Init(this, T("buy.title"), new Size(780, 560));
         Dlg.Cap(this, T("col.Security"), 20, 14);
         cb.Location = new Point(20, 36); Controls.Add(cb);
-        var dt = Db.Table("SELECT Id, Symbol + N'  —  ' + Name AS Label FROM Securities WHERE Status=N'Размещён' ORDER BY Symbol");
-        var all = dt.NewRow(); all["Id"] = 0; all["Label"] = T("b.all"); dt.Rows.InsertAt(all, 0);
+        var dt = new DataTable();
+        dt.Columns.Add("Id", typeof(int)); dt.Columns.Add("Label", typeof(string));
+        dt.Rows.Add(0, T("b.all"));
+        foreach (var s in (System.Text.Json.Nodes.JsonArray)Api.Get("/securities")!)
+            dt.Rows.Add(Api.Int(s!["Id"]), s["Symbol"] + "  —  " + s["Name"]);
         cb.DisplayMember = "Label"; cb.ValueMember = "Id"; cb.DataSource = dt;
         if (securityId != null) cb.SelectedValue = securityId.Value;
 
@@ -90,7 +93,7 @@ public class BuyForm : Form
     void LoadOffers()
     {
         int sid = cb.SelectedValue is int v ? v : 0;
-        g.DataSource = Db.Table(Ui.OffersSql, "@c", clientId, "@s", sid == 0 ? null : sid);
+        g.DataSource = Ui.Offers(clientId, sid == 0 ? null : sid);
         Ui.Headers(g);
         Upd();
     }
@@ -147,10 +150,8 @@ public class SellForm : Form
         Dlg.Init(this, T("sell.title"), new Size(480, 400));
         Dlg.Cap(this, T("col.Security"), 20, 14);
         cb.Location = new Point(20, 36); Controls.Add(cb);
-        var t = Db.Table(@"SELECT s.Id, s.Symbol, s.Name, s.Price,
-              h.Quantity - ISNULL((SELECT SUM(l.Quantity) FROM Listings l WHERE l.SellerClientId=@c AND l.SecurityId=h.SecurityId AND l.Status=N'Активно'),0) AS Free
-              FROM Holdings h JOIN DepoAccounts d ON d.Id=h.DepoAccountId JOIN Securities s ON s.Id=h.SecurityId
-              WHERE d.ClientId=@c AND s.Status=N'Размещён'", "@c", clientId);
+        // свободные к продаже бумаги (за вычетом уже выставленных) считает сервер
+        var t = Api.Table("/sellable?clientId=" + clientId);
         t.Columns.Add("Label", typeof(string), "Symbol + '  —  ' + Name + '  (' + Convert(Free, 'System.String') + ')'");
         cb.DisplayMember = "Label"; cb.ValueMember = "Id";
         cb.DataSource = new DataView(t) { RowFilter = "Free > 0" };
@@ -244,9 +245,7 @@ public class OffersForm : Form
 
     void Reload()
     {
-        g.DataSource = Db.Table(@"SELECT l.Id, s.Symbol, s.Name, l.Quantity AS Qty, l.Price AS Price, l.CreatedAt
-                                  FROM Listings l JOIN Securities s ON s.Id=l.SecurityId
-                                  WHERE l.SellerClientId=@c AND l.Status=N'Активно' ORDER BY l.CreatedAt DESC", "@c", clientId);
+        g.DataSource = Api.Table("/my-offers?clientId=" + clientId);
         Ui.Headers(g);
     }
 }

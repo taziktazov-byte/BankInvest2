@@ -1,0 +1,12 @@
+{
+  "name": "bankinvest2",
+  "private": true,
+  "version": "1.0.0",
+  "description": "BankInvest — desktop (WinForms) + web + shared server",
+  "scripts": {
+    "start": "node server/src/server.js",
+    "server": "node server/src/server.js",
+    "reset-db": "npm --prefix server run reset-db"
+  },
+  "engines": { "node": ">=22.5.0" }
+}

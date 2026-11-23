@@ -1,51 +1,20 @@
-using Microsoft.Data.SqlClient;
 using static BankInvest.Loc;
 
 namespace BankInvest;
 
-// Торговля: покупка по предложению, выставление на продажу, отзыв предложения
+// Торговля: покупка по предложению, выставление на продажу, отзыв предложения.
+// Все правила (комиссия 0,5 %, лимиты цены ±, свободный остаток) проверяет сервер,
+// поэтому сделка из веб-версии и из приложения учитывается одинаково.
 public static class Trading
 {
-    static Exception Map(SqlException ex)
-    {
-        string k = ex.Message switch
-        {
-            "ERR_NOLISTING" => "e.nolisting", "ERR_OWN" => "e.own", "ERR_QTY" => "e.qty", "ERR_ACC" => "e.noaccount",
-            "ERR_SELLERQTY" => "e.sellerqty", "ERR_FREE" => "e.free", "ERR_PRICE" => "e.price", _ => ""
-        };
-        return k == "" ? ex : new Exception(T(k));
-    }
+    public static void Buy(int listingId, int buyerId, int qty) =>
+        Api.Post("/trade/buy", new { listingId, qty, clientId = buyerId });
 
-    public static void Buy(int listingId, int buyerId, int qty)
-    {
-        try { Db.Exec("EXEC usp_BuyListing @l,@b,@q", "@l", listingId, "@b", buyerId, "@q", qty); }
-        catch (SqlException ex) { throw Map(ex); }
-        Db.Audit("Покупка по предложению", $"Listing={listingId} x{qty}");
-    }
+    public static void Sell(int clientId, int securityId, int qty, decimal price) =>
+        Api.Post("/trade/sell", new { securityId, qty, price, clientId });
 
-    public static void Sell(int clientId, int securityId, int qty, decimal price)
-    {
-        try
-        {
-            Db.Exec(@"SET XACT_ABORT ON; BEGIN TRAN;
-                DECLARE @acc INT = (SELECT TOP 1 Id FROM DepoAccounts WHERE ClientId=@c);
-                DECLARE @have INT = ISNULL((SELECT Quantity FROM Holdings WHERE DepoAccountId=@acc AND SecurityId=@s),0);
-                DECLARE @res INT = ISNULL((SELECT SUM(Quantity) FROM Listings WHERE SellerClientId=@c AND SecurityId=@s AND Status=N'Активно'),0);
-                DECLARE @mp DECIMAL(18,2) = (SELECT Price FROM Securities WHERE Id=@s);
-                IF @q <= 0 OR @q > @have - @res BEGIN ROLLBACK; RAISERROR(N'ERR_FREE',16,1); RETURN; END
-                IF @p <= 0 OR @p < @mp*0.3 OR @p > @mp*3 BEGIN ROLLBACK; RAISERROR(N'ERR_PRICE',16,1); RETURN; END
-                INSERT Listings(SellerClientId,SecurityId,Quantity,Price) VALUES(@c,@s,@q,@p);
-                COMMIT;", "@c", clientId, "@s", securityId, "@q", qty, "@p", Math.Round(price, 2));
-        }
-        catch (SqlException ex) { throw Map(ex); }
-        Db.Audit("Выставлено на продажу", $"Security={securityId} x{qty} @ {price}");
-    }
-
-    public static void Withdraw(int listingId, int clientId)
-    {
-        Db.Exec("UPDATE Listings SET Status=N'Отозвано' WHERE Id=@i AND SellerClientId=@c AND Status=N'Активно'", "@i", listingId, "@c", clientId);
-        Db.Audit("Предложение отозвано", "Id=" + listingId);
-    }
+    public static void Withdraw(int listingId, int clientId) =>
+        Api.Post("/trade/withdraw", new { listingId, clientId });
 }
 
 public static class Ui
@@ -89,12 +58,12 @@ public static class Ui
         }
     }
 
-    // предложения о продаже (для окна покупки и страницы бумаги); исключаем собственные предложения клиента
-    public const string OffersSql = @"SELECT l.Id, l.SecurityId, s.Symbol, s.Name,
-           CASE WHEN c.Kind='Personal' THEN N'Personal' ELSE c.Name END AS Seller,
-           l.Quantity AS Available, l.Price AS Price,
-           CAST((l.Price - s.Price) * 100.0 / NULLIF(s.Price,0) AS DECIMAL(9,2)) AS VsMarket
-        FROM Listings l JOIN Securities s ON s.Id=l.SecurityId JOIN Clients c ON c.Id=l.SellerClientId
-        WHERE l.Status=N'Активно' AND l.Quantity>0 AND (@c IS NULL OR l.SellerClientId<>@c) AND (@s IS NULL OR l.SecurityId=@s)
-        ORDER BY s.Symbol, l.Price";
+    // предложения о продаже (для окна покупки и страницы бумаги); свои предложения сервер исключает
+    public static DataTable Offers(int? clientId, int? securityId)
+    {
+        var q = "/offers?";
+        if (clientId != null) q += "clientId=" + clientId + "&";
+        if (securityId != null) q += "security=" + securityId;
+        return Api.Table(q);
+    }
 }
