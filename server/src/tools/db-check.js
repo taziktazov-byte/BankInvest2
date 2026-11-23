@@ -34,6 +34,14 @@ async function main() {
   const present = await D.all(`SELECT name, type FROM sys.objects WHERE type IN ('U','P')`);
   const have = new Set(present.map(r => String(r.name)));
   const missing = tables.filter(t => !have.has(t));
+
+  // Права на процедуры проверяем отдельно: sys.objects показывает лишь объекты,
+  // на которые у логина есть хоть какое-то право. Без EXECUTE процедура «невидима».
+  const procRights = {};
+  for (const proc of procs) {
+    const row = await D.get(`SELECT HAS_PERMS_BY_NAME(?, 'OBJECT', 'EXECUTE') AS CanExec`, `dbo.${proc}`);
+    procRights[proc] = !!(row && row.CanExec);
+  }
   if (missing.length) {
     problems++;
     console.log('  Таблицы      : НЕ НАЙДЕНЫ: ' + missing.join(', '));
@@ -51,10 +59,18 @@ async function main() {
     console.log('  Данные       : ' + Object.entries(c || {}).map(([k, v]) => `${k}=${v}`).join(', '));
   }
 
+  const login = process.env.MSSQL_USER || '<логин>';
   for (const proc of procs) {
-    const exists = have.has(proc);
-    if (!exists) problems++;
-    console.log(`  Процедура    : ${proc} — ${exists ? 'есть' : 'НЕТ (выполните db/schema.sql в SSMS)'}`);
+    if (procRights[proc]) {
+      console.log(`  Процедура    : ${proc} — есть, право EXECUTE выдано`);
+    } else {
+      problems++;
+      // Без права на объект SQL Server не показывает его в sys.objects, поэтому
+      // «процедуры нет» и «нет права» неразличимы — сообщаем оба варианта.
+      console.log(`  Процедура    : ${proc} — недоступна логину: нет права EXECUTE или процедуры нет`);
+      console.log('  Что сделать  : под администратором в базе ' + D.DATABASE + ':');
+      console.log(`                 GRANT EXECUTE ON OBJECT::dbo.${proc} TO ${login};`);
+    }
   }
 
   console.log('─'.repeat(64));

@@ -174,3 +174,30 @@ test('describeError: номер и текст ошибки SQL Server не те�
   assert.match(text, /EXECUTE permission/);
   assert.match(text, /строка 12/);
 });
+
+// --- плейсхолдеры: mssql понимает только именованные параметры (@p1), не '?' ---
+// Регрессия: '?' уходил в сервер как есть -> «Incorrect syntax near '?'» при входе
+// и в любом другом запросе с параметрами.
+test('namedParams: ? заменяются на @p1, @p2, ... по порядку', () => {
+  assert.equal(D.namedParams('SELECT TOP 1 * FROM Sessions WHERE Token=?'),
+    'SELECT TOP 1 * FROM Sessions WHERE Token=@p1');
+  assert.equal(D.namedParams('UPDATE Sessions SET Lang=? WHERE Token=?'),
+    'UPDATE Sessions SET Lang=@p1 WHERE Token=@p2');
+  assert.equal(D.namedParams('EXEC usp_BuyListing @ListingId=?, @BuyerId=?, @Qty=?'),
+    'EXEC usp_BuyListing @ListingId=@p1, @BuyerId=@p2, @Qty=@p3');
+  assert.equal(D.namedParams('SELECT COUNT(*) FROM Clients'), 'SELECT COUNT(*) FROM Clients');
+});
+
+test('namedParams: ? внутри строкового литерала остаётся текстом', () => {
+  assert.equal(D.namedParams("SELECT '?' AS q, Id FROM T WHERE Id=?"),
+    "SELECT '?' AS q, Id FROM T WHERE Id=@p1");
+  assert.equal(D.namedParams("SELECT 'it''s ?' AS q, Id FROM T WHERE Id=?"),
+    "SELECT 'it''s ?' AS q, Id FROM T WHERE Id=@p1");
+});
+
+test('namedParams: IN (...) со списком и проверки на NULL работают как раньше', () => {
+  assert.equal(D.namedParams("SELECT 1 FROM Users WHERE Login=? AND CompanyId IN ('ASB','PERSONAL')"),
+    "SELECT 1 FROM Users WHERE Login=@p1 AND CompanyId IN ('ASB','PERSONAL')");
+  assert.equal(D.namedParams('SELECT 1 FROM Holdings WHERE (? IS NULL OR DepoAccountId=?)'),
+    'SELECT 1 FROM Holdings WHERE (@p1 IS NULL OR DepoAccountId=@p2)');
+});

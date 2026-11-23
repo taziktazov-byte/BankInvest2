@@ -129,6 +129,13 @@ function describeError(e) {
 }
 
 // ---------------------------------------------------------------- helpers
+// mssql НЕ понимает '?': он ждёт именованные параметры (@p1), которые объявляет
+// в sp_executesql. Плейсхолдеры переводим по порядку, не задевая '?' в литералах.
+function namedParams(text) {
+  let n = 0;
+  return String(text).replace(/'(?:[^']|'')*'|\?/g, m => (m === '?' ? '@p' + (++n) : m));
+}
+
 function bind(req, params) {
   for (let i = 0; i < params.length; i++) {
     const v = params[i];
@@ -198,7 +205,7 @@ async function query(text, params = [], conn = null) {
   const p = conn || await ensurePool();
   const req = bind(p.request(), params);
   try {
-    const r = await req.query(text);
+    const r = await req.query(namedParams(text));
     return { rows: firstRows(r), raw: r };
   } catch (e) {
     const mapped = tradeError(e);
@@ -237,7 +244,7 @@ async function exec(text, params = [], conn = null) {
   const p = conn || await ensurePool();
   const req = bind(p.request(), params);
   try {
-    return await req.query(text);
+    return await req.query(namedParams(text));
   } catch (e) {
     const mapped = tradeError(e);
     if (mapped) throw new ApiError(mapped, 400);
@@ -395,6 +402,6 @@ module.exports = {
   sql, ensurePool, closePool, init, updatePrices, audit,
   query, all, get, scalar, run, exec, tx,
   hash, now, toIso, err, ApiError, describeError,
-  toObjects, firstRows,   // экспортируются для тестов
+  toObjects, firstRows, namedParams,   // экспортируются для тестов
   DB_FILE, DATABASE, SERVER, CONFIG,
 };
