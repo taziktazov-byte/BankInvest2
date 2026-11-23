@@ -37,6 +37,12 @@ async function main() {
 
   // Права на процедуры проверяем отдельно: sys.objects показывает лишь объекты,
   // на которые у логина есть хоть какое-то право. Без EXECUTE процедура «невидима».
+  // Право менять структуру: нужно для npm run db:init (schema.sql пересоздаёт
+  // процедуры через DROP + CREATE). Проверяем заранее, чтобы не узнать об этом
+  // посреди скрипта.
+  const canAlter = !!(await D.scalar(
+    "SELECT HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'ALTER') AS CanAlter"));
+
   const procRights = {};
   for (const proc of procs) {
     const row = await D.get(`SELECT HAS_PERMS_BY_NAME(?, 'OBJECT', 'EXECUTE') AS CanExec`, `dbo.${proc}`);
@@ -78,6 +84,15 @@ async function main() {
       console.log('  Что сделать  : под администратором в базе ' + D.DATABASE + ':');
       console.log(`                 GRANT EXECUTE ON OBJECT::dbo.${proc} TO ${login};`);
     }
+  }
+
+  if (!canAlter) {
+    console.log('  Схема        : менять структуру нельзя (нет права ALTER)');
+    console.log('  Что сделать   : перед npm run db:init выполните в SSMS db\\grant-ddl.sql');
+    console.log(`                  (или: ALTER ROLE db_ddladmin ADD MEMBER [${login}];)`);
+    problems++;
+  } else {
+    console.log('  Схема        : менять структуру можно (ALTER есть)');
   }
 
   console.log('─'.repeat(64));

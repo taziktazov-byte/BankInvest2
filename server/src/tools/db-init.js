@@ -36,6 +36,26 @@ async function main() {
   await D.ensurePool();
   console.log('  ✔ соединение установлено');
 
+  // Предварительная проверка прав: schema.sql делает DROP + CREATE процедур,
+  // то есть требует права менять структуру базы. У логина приложения
+  // (bankinvest) их обычно нет — иначе ошибка вылезет посреди скрипта,
+  // уже после того как часть объектов создана.
+  const canAlter = await D.scalar(
+    "SELECT HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'ALTER') AS CanAlter");
+  if (!canAlter) {
+    console.error('');
+    console.error('  ✖ У логина нет права менять структуру базы (ALTER).');
+    console.error('');
+    console.error('    Быстрое решение — выполнить в SSMS файл db\\grant-ddl.sql');
+    console.error('    (или выдать право вручную, под администратором):');
+    console.error('        USE BankInvest;');
+    console.error('        ALTER ROLE db_ddladmin ADD MEMBER [bankinvest];');
+    console.error('    Затем снова: npm run db:init');
+    console.error('');
+    await D.closePool();
+    process.exit(1);
+  }
+
   // schema.sql идемпотентен: недостающие таблицы создаст, существующие не тронет,
   // процедуры пересоздаст. Поэтому применяем всегда — так база, восстановленная
   // из старого .bak, догоняется до текущей версии (например, появляется Sessions).
