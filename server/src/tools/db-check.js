@@ -92,6 +92,8 @@ main()
     console.error('─'.repeat(64));
     if (e.dbMessage && e.dbMessage !== e.message) console.error('  ' + D.describeError(e));
     console.error('  Проверьте службу SQL Server, TCP/IP + порт 1433, логин/пароль и имя базы.');
+    console.error('');
+    console.error('  Подробная диагностика (порт, службы, экземпляры):  npm run sql:doctor');
     await D.closePool();
     process.exit(1);
   });

@@ -82,6 +82,11 @@ if not defined NODE_EXE (
 ) else (
   pushd server
   node src\tools\db-check.js
+  rem если порт закрыт - подробная диагностика с подсказками
+  if errorlevel 1 (
+    echo.
+    node src\tools\sql-doctor.js
+  )
   popd
 )
 
