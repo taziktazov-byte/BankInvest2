@@ -160,7 +160,16 @@ function sqlError(e) {
       + '(или откройте db/schema.sql в SSMS и нажмите F5).';
     return out;
   }
-  // 229/262/230 — нет прав; 15151 — нет права на изменение объекта
+  // 3701/15151 — нет права менять объект (schema.sql делает DROP PROCEDURE),
+  // 262 — нет права CREATE. Отдельный совет, иначе человек не поймёт, что делать.
+  if (e && (e.number === 3701 || e.number === 15151 || e.number === 262)) {
+    out.key = 'db.permission';
+    out.hint = `У логина «${USER || 'Windows'}» нет права менять структуру базы. `
+      + 'Выполните в SSMS файл db\\grant-ddl.sql (или: ALTER ROLE db_ddladmin ADD MEMBER ['
+      + `${USER || 'bankinvest'}];), затем повторите npm run db:init`;
+    return out;
+  }
+  // 229/230 — нет прав на данные
   if (e && (e.number === 229 || e.number === 262 || e.number === 230 || e.number === 15151)) {
     out.key = 'db.permission';
     out.hint = 'Нужны права db_datareader, db_datawriter, а для изменения процедур — db_ddladmin (или владелец схемы dbo)';
