@@ -1,7 +1,6 @@
 using System.Data;
 using System.Globalization;
 using System.Text;
-using Microsoft.Data.SqlClient;
 using static BankInvest.Loc;
 
 namespace BankInvest;
@@ -22,7 +21,7 @@ public class MainForm : Form
     readonly Label info = new() { Dock = DockStyle.Fill, Font = new Font("Segoe UI", 12), Padding = new Padding(30), Visible = false };
     readonly ComboBox cbClient = new() { Width = 220, DropDownStyle = ComboBoxStyle.DropDownList, Margin = new Padding(4, 9, 4, 0) };
     readonly Label brand = new() { ForeColor = Color.White, Font = new Font("Segoe UI", 14, FontStyle.Bold), Width = 210, Height = 50 };
-    readonly System.Windows.Forms.Timer priceTimer = new() { Interval = 60000 };
+
     readonly HomeView home = new() { Visible = false };
     readonly HelpPanel help = new() { Visible = false };
     readonly List<(Button b, string key)> menu = new();
@@ -38,7 +37,8 @@ public class MainForm : Form
         grid.ColumnHeadersDefaultCellStyle.BackColor = Color.White;
         grid.ColumnHeadersDefaultCellStyle.Font = new Font("Segoe UI", 9, FontStyle.Bold);
         grid.RowTemplate.Height = 32;
-        grid.DataError += (_, e) => { e.ThrowException = false; MessageBox.Show(T("e.bad")); };
+        // предупреждаем только при вводе целевых долей в портфеле (в остальных разделах данные только для чтения)
+        grid.DataError += (_, e) => { e.ThrowException = false; if (view == "Portfolio" && !grid.ReadOnly) MessageBox.Show(T("e.bad")); };
         grid.CellEndEdit += (_, _) => { if (view == "Portfolio") Recalc(); };
         grid.CellDoubleClick += (_, e) =>
         {
@@ -62,10 +62,8 @@ public class MainForm : Form
         BuildMenu();
         ApplyLang();
         Loc.Changed += ApplyLang;                       // язык меняется прямо в приложении
-        FormClosed += (_, _) => { Loc.Changed -= ApplyLang; priceTimer.Stop(); };
-        priceTimer.Tick += (_, _) => TickPrices();
-        priceTimer.Start();
-        TickPrices(); // при запуске «догоняем» пропущенные часы
+        FormClosed += (_, _) => { Loc.Changed -= ApplyLang; Api.ServerEvent -= OnServerEvent; };
+        Api.ServerEvent += OnServerEvent;   // живые обновления: изменения из веб-версии и с других ПК
     }
 
     // ---------- меню ----------
@@ -78,7 +76,7 @@ public class MainForm : Form
         if (Session.IsAdmin) items.Add(("Admin", "m.Admin"));
         items.Add(("Help", "m.Help"));
         foreach (var (v, key) in items) side.Controls.Add(MenuBtn(key, () => Show(v)));
-        var lo = MenuBtn("m.Logout", () => { Db.Audit("Выход"); LoggedOut = true; Close(); });
+        var lo = MenuBtn("m.Logout", () => { LoggedOut = true; Close(); });   // сервер фиксирует выход при закрытии сессии
         lo.ForeColor = Color.IndianRed;
         side.Controls.Add(lo);
         side.Controls.Add(new LangBar(Color.White, false, 214) { Margin = new Padding(8, 25, 0, 0) });
@@ -158,25 +156,21 @@ public class MainForm : Form
 
     void LoadProfile()
     {
-        var c = Db.Table("SELECT Name, CASE WHEN Kind='Personal' THEN NULL ELSE UNP END AS UNP, Address, Contacts, Status, Kind FROM Clients WHERE Id=@i", "@i", Session.ClientId);
-        if (c.Rows.Count == 0) { info.Text = T("nodata"); return; }
-        var r = c.Rows[0];
-        string F(string col, bool loc = false) { var s = r[col]?.ToString() ?? ""; return $"{Col(col)}: {(loc ? Val(s) : s)}\n"; }
-        info.Text = F("Name") + (r["UNP"] is DBNull ? "" : F("UNP")) + F("Address") + F("Contacts") + F("Status", true) + F("Kind", true);
+        var p = Api.Get("/profile");
+        string F(string col, bool loc = false) { var v = p[col]?.ToString() ?? ""; return $"{Col(col)}: {(loc ? Val(v) : v)}\n"; }
+        info.Text = F("Name") + (p["UNP"] == null ? "" : F("UNP")) + F("Address") + F("Contacts") + F("Status", true) + F("Kind", true);
     }
 
     // ---------- клиенты ----------
     void LoadClients()
     {
-        Bind(Db.Table(@"SELECT c.Id, c.Name, CASE WHEN c.Kind='Personal' THEN NULL ELSE c.UNP END AS UNP, c.Address, c.Contacts, c.Status, c.Kind,
-                        (SELECT TOP 1 Number FROM DepoAccounts d WHERE d.ClientId=c.Id) AS Depo FROM Clients c ORDER BY c.Name"));
+        Bind(Api.Table("/clients"));
         actions.Controls.Add(Btn("b.AddClient", AddClient, true));
         if (Session.IsAdmin) actions.Controls.Add(Btn("b.Delete", () =>
         {
             if (SelId() is not int id) return;
             if (MessageBox.Show(T("e.delclient"), T("e.cascade"), MessageBoxButtons.YesNo) != DialogResult.Yes) return;
-            Db.Exec("DELETE FROM Clients WHERE Id=@i", "@i", id);
-            Db.Audit("Удаление клиента", "Id=" + id);
+            Api.Delete("/clients/" + id);
             LoadClients();
         }));
         actions.Controls.Add(Btn("b.Export", Export));
@@ -188,14 +182,7 @@ public class MainForm : Form
         if (v == null) return;
         if (!System.Text.RegularExpressions.Regex.IsMatch(v[1], @"^\d{9}$")) throw new Exception(T("reg.e.unp"));
         if (v[0] == "" || v[4].Length < 6) throw new Exception(T("reg.e.empty"));
-        if (Db.Scalar("SELECT 1 FROM Clients WHERE UNP=@u", "@u", v[1]) != null) throw new Exception(T("reg.e.exists"));
-        Db.Exec(@"SET XACT_ABORT ON; BEGIN TRAN;
-                  INSERT Clients(Name,UNP,Address,Contacts,Kind) VALUES(@n,@u,@a,@c,'Company');
-                  DECLARE @id INT = SCOPE_IDENTITY();
-                  INSERT DepoAccounts(ClientId,Number) VALUES(@id,'DEPO-'+@u);
-                  INSERT Users(CompanyId,Login,PasswordHash,Role,ClientId) VALUES(@u,@u,@h,'Client',@id);
-                  COMMIT;", "@n", v[0], "@u", v[1], "@a", v[2], "@c", v[3], "@h", Db.Hash(v[4]));
-        Db.Audit("Создан клиент + счёт депо", v[1]);
+        Api.Post("/clients", new { name = v[0], unp = v[1], address = v[2], contacts = v[3], password = v[4] });
         LoadClients();
     }
 
@@ -206,7 +193,7 @@ public class MainForm : Form
         {
             var keep = cbClient.SelectedValue as int?;
             cbClient.SelectedIndexChanged -= CbChanged;
-            cbClient.DataSource = Db.Table("SELECT Id,Name FROM Clients ORDER BY Name");
+            cbClient.DataSource = Api.Table("/clients/lite");
             cbClient.DisplayMember = "Name"; cbClient.ValueMember = "Id";
             if (keep != null) cbClient.SelectedValue = keep;
             cbClient.SelectedIndexChanged += CbChanged;
@@ -226,14 +213,11 @@ public class MainForm : Form
 
     void LoadPortfolio()
     {
-        var t = Db.Table(@"SELECT h.Id, s.Symbol, s.Name, s.Segment, h.Quantity AS Qty,
-                           ISNULL((SELECT SUM(l.Quantity) FROM Listings l WHERE l.SellerClientId=d.ClientId AND l.SecurityId=h.SecurityId AND l.Status=N'Активно'),0) AS ForSale,
-                           s.Price AS Price, s.ExpenseRatio, h.Quantity*s.Price AS CurrentValue, h.TargetPct
-                           FROM Holdings h JOIN DepoAccounts d ON d.Id=h.DepoAccountId JOIN Securities s ON s.Id=h.SecurityId
-                           WHERE d.ClientId=@c ORDER BY s.Symbol", "@c", CurClient);
-        t.Columns.Add("CurrentPct", typeof(decimal)).SetOrdinal(9);
-        t.Columns.Add("TargetValue", typeof(decimal)).SetOrdinal(10);
-        t.Columns.Add("Amount", typeof(decimal));
+        var d = Api.Get("/portfolio" + (Session.IsStaff ? "?clientId=" + CurClient : ""));
+        var t = Api.Table(d["rows"]!);
+        // порядок столбцов — как в исходном приложении
+        var order = new[] { "Id", "Symbol", "Name", "Segment", "Qty", "ForSale", "Price", "ExpenseRatio", "CurrentValue", "CurrentPct", "TargetValue", "TargetPct", "Amount" };
+        for (int i = 0; i < order.Length; i++) if (t.Columns.Contains(order[i])) t.Columns[order[i]]!.SetOrdinal(i);
         Bind(t);
         foreach (DataGridViewColumn c in grid.Columns) c.ReadOnly = c.Name != "TargetPct";
         grid.Columns["Qty"]!.FillWeight = 45; grid.Columns["ForSale"]!.FillWeight = 55; grid.Columns["Price"]!.FillWeight = 55;
@@ -265,9 +249,13 @@ public class MainForm : Form
     {
         if (grid.DataSource is not DataTable t) return;
         Recalc();
-        if (t.AsEnumerable().Sum(r => r.Field<decimal>("TargetPct")) > 100) throw new Exception(T("e.sum100"));
-        foreach (DataRow r in t.Rows) Db.Exec("UPDATE Holdings SET TargetPct=@p WHERE Id=@i", "@p", r["TargetPct"], "@i", r["Id"]);
-        Db.Audit("Сохранены целевые доли", "Client=" + CurClient);
+        if (t.AsEnumerable().Sum(r => r.IsNull("TargetPct") ? 0 : r.Field<decimal>("TargetPct")) > 100) throw new Exception(T("e.sum100"));
+        var rows = t.AsEnumerable().Select(r => new
+        {
+            id = Convert.ToInt32(r["Id"]),
+            targetPct = r.IsNull("TargetPct") ? (decimal?)null : r.Field<decimal>("TargetPct")
+        }).ToArray();
+        Api.Post("/portfolio/targets", new { clientId = Session.IsStaff ? CurClient : (int?)null, rows });
         MessageBox.Show(T("e.saved"));
     }
 
@@ -276,47 +264,27 @@ public class MainForm : Form
         var v = Prompt(T("b.AddHolding"), (T("col.Symbol"), "", false), (T("p.Qty"), "1", false));
         if (v == null) return;
         if (!int.TryParse(v[1], out int q) || q <= 0) throw new Exception(T("e.qty"));
-        var acc = Db.Scalar("SELECT TOP 1 Id FROM DepoAccounts WHERE ClientId=@c", "@c", CurClient) ?? throw new Exception(T("e.noaccount"));
-        var sec = Db.Scalar("SELECT Id FROM Securities WHERE Symbol=@s", "@s", v[0]) ?? throw new Exception(T("e.nosec"));
-        Db.Exec(@"IF EXISTS(SELECT 1 FROM Holdings WHERE DepoAccountId=@a AND SecurityId=@s) UPDATE Holdings SET Quantity=Quantity+@q WHERE DepoAccountId=@a AND SecurityId=@s
-                  ELSE INSERT Holdings(DepoAccountId,SecurityId,Quantity) VALUES(@a,@s,@q)", "@a", acc, "@s", sec, "@q", q);
-        Db.Audit("Добавлен актив", v[0]);
+        Api.Post("/portfolio/holdings", new { symbol = v[0], qty = q, clientId = CurClient });
         LoadPortfolio();
     }
 
     // ---------- транзакции ----------
     void LoadTransactions()
     {
-        Bind(Db.Table(@"SELECT t.Id, t.Date AS [Date], c.Name AS Client, s.Symbol AS Security, t.Type AS [Type], t.Quantity AS Qty,
-                        t.Price AS Price, t.Commission AS Commission, t.Status AS Status
-                        FROM Transactions t JOIN DepoAccounts d ON d.Id=t.DepoAccountId JOIN Clients c ON c.Id=d.ClientId JOIN Securities s ON s.Id=t.SecurityId
-                        WHERE (@c IS NULL OR c.Id=@c) ORDER BY t.Date DESC", "@c", Session.IsStaff ? null : Session.ClientId));
+        Bind(Api.Table("/transactions"));   // сервер сам ограничивает выборку клиентом или показывает все для сотрудника
         actions.Controls.Add(Btn("b.Export", Export));
     }
 
     // ---------- инвестпроекты ----------
     void LoadProjects()
     {
-        var t = Db.Table("SELECT Id, Name AS Project, Rate, CashFlows FROM InvestmentProjects");
-        foreach (var n in new[] { "NPV", "IRR", "PI", "Payback" }) t.Columns.Add(n, typeof(string));
-        foreach (DataRow r in t.Rows)
-        {
-            var cf = ((string)r["CashFlows"]).Split(';').Select(x => double.Parse(x.Trim(), CultureInfo.InvariantCulture)).ToArray();
-            double rate = (double)(decimal)r["Rate"] / 100;
-            double Npv(double q) => cf.Select((c, i) => c / Math.Pow(1 + q, i)).Sum();
-            double lo = -0.99, hi = 10; // IRR — бисекция
-            for (int i = 0; i < 200; i++) { double mid = (lo + hi) / 2; if (Npv(mid) > 0) lo = mid; else hi = mid; }
-            double pi = cf.Skip(1).Select((c, i) => c / Math.Pow(1 + rate, i + 1)).Sum() / -cf[0];
-            double cum = cf[0]; string pb = T("p.never");
-            for (int i = 1; i < cf.Length; i++) { if (cum + cf[i] >= 0) { pb = (i - 1 + -cum / cf[i]).ToString("0.00"); break; } cum += cf[i]; }
-            r["NPV"] = Npv(rate).ToString("N2"); r["IRR"] = (lo * 100).ToString("N2"); r["PI"] = pi.ToString("N2"); r["Payback"] = pb;
-        }
-        Bind(t);
+        // NPV, IRR, PI и срок окупаемости считает сервер (одинаково для веб и десктопа)
+        Bind(Api.Table("/projects"));
         actions.Controls.Add(Btn("b.AddProject", () =>
         {
             var v = Prompt(T("p.NewProject"), (T("col.Project"), "", false), (T("p.Rate"), "10", false), (T("p.Flows") + " (-1000;300;400)", "", false));
             if (v == null) return;
-            Db.Exec("INSERT InvestmentProjects(Name,Rate,CashFlows) VALUES(@n,@r,@c)", "@n", v[0], "@r", decimal.Parse(v[1], CultureInfo.InvariantCulture), "@c", v[2]);
+            Api.Post("/projects", new { name = v[0], rate = double.Parse(v[1], CultureInfo.InvariantCulture), cashFlows = v[2] });
             LoadProjects();
         }, true));
         actions.Controls.Add(Btn("b.Export", Export));
@@ -325,11 +293,9 @@ public class MainForm : Form
     // ---------- отчёты ----------
     void LoadReport()
     {
-        var t = Db.Table(@"DECLARE @f DATETIME=DATEADD(DAY,-30,GETDATE());
-            SELECT N'r.ops' AS Metric, CAST(COUNT(*) AS DECIMAL(18,2)) AS Value FROM Transactions WHERE Status=N'Исполнена' AND Date>=@f
-            UNION ALL SELECT N'r.income', ISNULL(SUM(Commission),0) FROM Transactions WHERE Status=N'Исполнена' AND Date>=@f
-            UNION ALL SELECT N'r.top:'+Symbol, Cnt FROM (SELECT TOP 3 s.Symbol, CAST(COUNT(*) AS DECIMAL(18,2)) Cnt FROM Transactions t JOIN Securities s ON s.Id=t.SecurityId
-                      WHERE t.Date>=@f GROUP BY s.Symbol ORDER BY COUNT(*) DESC) x");
+        var t = Api.Table("/report");
+        if (t.Columns.Contains("metric")) t.Columns["metric"]!.ColumnName = "Metric";
+        if (t.Columns.Contains("value")) t.Columns["value"]!.ColumnName = "Value";
         foreach (DataRow r in t.Rows)
         {
             var m = (string)r["Metric"];
@@ -342,29 +308,26 @@ public class MainForm : Form
     // ---------- администрирование ----------
     void LoadUsers()
     {
-        Bind(Db.Table("SELECT Id, CompanyId AS Company, Login, Role, IsActive AS Active FROM Users ORDER BY Role, Login"));
+        Bind(Api.Table("/users"));
         actions.Controls.Add(Btn("b.AddEmployee", () =>
         {
             var v = Prompt(T("p.NewEmp"), (T("reg.login"), "", false), (T("reg.pass"), "", true), (T("p.Role"), "Employee", false));
             if (v == null) return;
             if (v[0].Length < 3 || v[1].Length < 6) throw new Exception(T("reg.e.empty"));
-            if (Db.Scalar("SELECT 1 FROM Users WHERE Login=@l AND CompanyId IN ('ASB','PERSONAL')", "@l", v[0]) != null) throw new Exception(T("reg.e.exists"));
-            Db.Exec("INSERT Users(CompanyId,Login,PasswordHash,Role) VALUES('ASB',@l,@h,@r)", "@l", v[0], "@h", Db.Hash(v[1]), "@r", v[2] == "Admin" ? "Admin" : "Employee");
-            Db.Audit("Создан сотрудник", v[0]);
+            Api.Post("/users", new { login = v[0], password = v[1], role = v[2] == "Admin" ? "Admin" : "Employee" });
             LoadUsers();
         }, true));
         actions.Controls.Add(Btn("b.Delete", () =>
         {
             if (SelId() is not int id) return;
             if (grid.CurrentRow!.Cells["Login"].Value?.ToString() == Session.Login) throw new Exception(T("e.self"));
-            Db.Exec("DELETE FROM Users WHERE Id=@i", "@i", id);
-            Db.Audit("Удалена учётная запись", "Id=" + id);
+            Api.Delete("/users/" + id);
             LoadUsers();
         }));
         actions.Controls.Add(Btn("b.Log", () =>
         {
             title.Text = T("t.Log");
-            Bind(Db.Table("SELECT TOP 500 At AS [Time], UserLogin AS [User], Action, Details FROM AuditLog ORDER BY Id DESC"));
+            Bind(Api.Table("/audit"));
         }));
     }
 
@@ -398,19 +361,28 @@ public class MainForm : Form
         if (view == "Home") home.Reload(); else if (view == "Portfolio") LoadPortfolio();
     });
 
-    // Раз в минуту просим БД дописать цены за каждый ещё не записанный час; если что-то добавилось — обновляем главную
-    async void TickPrices()
+    // Сервер присылает события: «prices» — обновились котировки, «changed» — кто-то (веб-версия
+    // или другой компьютер) изменил данные. Тогда просто перечитываем текущий раздел.
+    void OnServerEvent(string type, string user)
     {
+        if (IsDisposed || !IsHandleCreated) return;
         try
         {
-            var added = await Task.Run(() => Db.Scalar("EXEC usp_UpdatePrices"));
-            if (Convert.ToInt32(added ?? 0) > 0 && view == "Home") home.Reload();
+            BeginInvoke(() =>
+            {
+                try
+                {
+                    if (view is "Home" or "Portfolio" or "Transactions") Show(view);
+                }
+                catch { }
+            });
         }
         catch { }
     }
 
     // ---------- утилиты ----------
     int? SelId() => grid.CurrentRow != null && grid.Columns.Contains("Id") ? Convert.ToInt32(grid.CurrentRow.Cells["Id"].Value) : null;
+
 
     void Export() // CSV с ';' и BOM — открывается в Excel
     {
@@ -422,7 +394,7 @@ public class MainForm : Form
         foreach (DataGridViewRow r in grid.Rows)
             sb.AppendLine(string.Join(";", cols.Select(c => Convert.ToString(r.Cells[c.Index].FormattedValue, CultureInfo.CurrentCulture)?.Replace(";", ","))));
         File.WriteAllText(d.FileName, sb.ToString(), new UTF8Encoding(true));
-        Db.Audit("Экспорт", view);
+        Api.Post("/audit", new { action = "Экспорт", details = view });
     }
 
     static string[]? Prompt(string title, params (string label, string def, bool pw)[] f)

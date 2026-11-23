@@ -26,7 +26,7 @@ public class StockForm : Form
     readonly DataGridView g = Ui.Grid();
     readonly Label lblOffers = new() { Left = 24, Top = 12, AutoSize = true, Font = new Font("Segoe UI", 11, FontStyle.Bold) };
     readonly Button btnBuy, btnSell;
-    readonly System.Windows.Forms.Timer timer = new() { Interval = 60000 };
+
 
     public StockForm(string symbol, int? clientId)
     {
@@ -76,12 +76,18 @@ public class StockForm : Form
         btnSell.Click += (_, _) => Safe(() => { using var f = new SellForm(clientId!.Value, secId); if (f.ShowDialog(this) == DialogResult.OK) ReloadAll(); });
 
         LoadHeader(); ApplyTexts(); LoadChart(); LoadOffers();
-        timer.Tick += (_, _) => Safe(ReloadAll);
-        timer.Start();
-        FormClosed += (_, _) => { timer.Stop(); timer.Dispose(); };
+        // страница сама обновляется, когда сервер сообщает об изменении цен или данных
+        Api.ServerEvent += OnServerEvent;
+        FormClosed += (_, _) => Api.ServerEvent -= OnServerEvent;
     }
 
     static void Safe(Action a) { try { a(); } catch (Exception ex) { MessageBox.Show(ex.Message, T("err.title")); } }
+
+    void OnServerEvent(string type, string user)
+    {
+        if (IsDisposed || !IsHandleCreated) return;
+        try { BeginInvoke(() => Safe(ReloadAll)); } catch { }
+    }
 
     static void Style(RadioButton b)
     {
@@ -99,39 +105,28 @@ public class StockForm : Form
 
     void LoadHeader()
     {
-        var t = Db.Table(@"SELECT s.Id, s.Symbol, s.Name, s.Kind, s.Segment, s.Nominal, s.Volume, s.Rate, s.Price, s.PrevPrice, i.Name AS Issuer
-                           FROM Securities s JOIN Issuers i ON i.Id=s.IssuerId WHERE s.Symbol=@s", "@s", symbol);
-        if (t.Rows.Count == 0) throw new Exception(T("e.nosec"));
-        var r = t.Rows[0];
-        secId = (int)r["Id"];
-        decimal price = (decimal)r["Price"], prev = (decimal)r["PrevPrice"];
+        var r = Api.Get("/stock/" + Uri.EscapeDataString(symbol));
+        secId = Api.Int(r["Id"]);
+        decimal price = Api.Dec(r["Price"]), prev = Api.Dec(r["PrevPrice"]);
         decimal chg = prev == 0 ? 0 : (price - prev) / prev * 100;
         var c = chg > 0 ? Up : chg < 0 ? Down : Color.Gray;
         Text = $"{symbol} — {r["Name"]}";
         lblTitle.Text = $"{symbol}  ·  {r["Name"]}";
-        lblSub.Text = $"{T("s.issuer")}: {r["Issuer"]}   ·   {Val((string)r["Kind"])} / {r["Segment"]}   ·   {T("s.nominal")}: {(decimal)r["Nominal"]:N2}   ·   {T("s.rate")}: {(decimal)r["Rate"]:N2}   ·   {T("s.volume")}: {r["Volume"]:N0}";
+        lblSub.Text = $"{T("s.issuer")}: {r["Issuer"]}   ·   {Val(r["Kind"]!.ToString())} / {r["Segment"]}   ·   {T("s.nominal")}: {Api.Dec(r["Nominal"]):N2}   ·   {T("s.rate")}: {Api.Dec(r["Rate"]):N2}   ·   {T("s.volume")}: {Api.Dec(r["Volume"]):N0}";
         lblPrice.Text = price.ToString("N2") + " BYN";
         lblChange.Left = lblPrice.Right + 16;
         lblChange.Text = (chg > 0 ? "▲ +" : chg < 0 ? "▼ " : "") + chg.ToString("N2") + "%  (24h)";
         lblChange.ForeColor = c;
     }
 
-    static string Bucket(string key, string part, int back) =>
-        $@"SELECT k AS At, Price FROM (SELECT {key} AS k, Price, ROW_NUMBER() OVER (PARTITION BY {key} ORDER BY At DESC) AS rn
-           FROM PriceHistory WHERE SecurityId=@s AND At>=DATEADD({part},{back},GETDATE())) x WHERE rn=1 ORDER BY k";
-
     void LoadChart()
     {
-        string sql = grain switch
-        {
-            0 => "SELECT At, Price FROM PriceHistory WHERE SecurityId=@s AND At>=DATEADD(HOUR,-48,GETDATE()) ORDER BY At",   // 48 часов, по часам
-            1 => Bucket("CAST(At AS DATE)", "DAY", -30),                                                                      // 30 дней, по дням
-            2 => Bucket("DATEADD(WEEK,DATEDIFF(WEEK,0,At),0)", "WEEK", -26),                                                  // 26 недель, по неделям
-            3 => Bucket("DATEADD(MONTH,DATEDIFF(MONTH,0,At),0)", "MONTH", -24),                                               // 24 месяца, по месяцам
-            _ => Bucket("DATEADD(YEAR,DATEDIFF(YEAR,0,At),0)", "YEAR", -5)                                                    // 5 лет, по годам
-        };
-        var t = Db.Table(sql, "@s", secId);
-        var list = t.AsEnumerable().Select(r => (r.Field<DateTime>("At"), r.Field<decimal>("Price"))).ToList();
+        // группировку (часы / дни / недели / месяцы / годы) выполняет сервер
+        var res = Api.Get($"/stock/{Uri.EscapeDataString(symbol)}/chart?grain={grain}");
+        var list = new List<(DateTime t, decimal p)>();
+        foreach (var pt in (JsonArray)res["points"]!)
+            list.Add((Api.Date(pt!["t"]!.ToString()), Api.Dec(pt["p"])));
+
         chart.SetData(list, Axis[grain], Tip[grain]);
         if (list.Count == 0) { lblStats.Text = ""; return; }
         decimal first = list[0].Item2, last = list[^1].Item2, low = list.Min(x => x.Item2), high = list.Max(x => x.Item2);
@@ -142,7 +137,7 @@ public class StockForm : Form
 
     void LoadOffers()
     {
-        g.DataSource = Db.Table(Ui.OffersSql, "@c", clientId, "@s", secId);
+        g.DataSource = Ui.Offers(clientId, secId);
         Ui.Headers(g);
         if (g.Columns.Contains("Symbol")) g.Columns["Symbol"]!.Visible = false;
         if (g.Columns.Contains("Name")) g.Columns["Name"]!.Visible = false;

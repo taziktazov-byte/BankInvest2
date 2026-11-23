@@ -78,34 +78,23 @@ public class HomeView : Panel
     {
         hello.Text = string.Format(T("home.hello"), Session.Login, Val(Session.Role));
         upT.Text = T("home.up"); downT.Text = T("home.down"); hint.Text = T("home.hint");
-        int? c = Session.IsStaff ? null : Session.ClientId;   // null = весь банк
-        string M(object? o) => Convert.ToDecimal(o ?? 0).ToString("N2") + " BYN";
 
-        var pv = Db.Scalar(@"SELECT ISNULL(SUM(h.Quantity*s.Price),0) FROM Holdings h JOIN DepoAccounts d ON d.Id=h.DepoAccountId
-                             JOIN Securities s ON s.Id=h.SecurityId WHERE (@c IS NULL OR d.ClientId=@c)", "@c", c);
-        var newOrders = Db.Scalar("SELECT COUNT(*) FROM Listings WHERE Status=N'Активно' AND (@c IS NULL OR SellerClientId=@c)", "@c", c);
+        // все показатели считает сервер — одинаково для веб-версии и приложения
+        var d = Api.Get("/home");
+        Api.StartListening();   // держим живое соединение (если окно пересоздано после входа)
         kpis.Controls.Clear();
-        if (Session.IsStaff)
+        var colors = new Dictionary<string, Color>
         {
-            var clients = Db.Scalar("SELECT COUNT(*) FROM Clients");
-            var income = Db.Scalar("SELECT ISNULL(SUM(Commission),0) FROM Transactions WHERE Status=N'Исполнена'");
-            kpis.Controls.AddRange(new Control[] {
-                Card(T("k.clients"), $"{clients}", Color.SteelBlue), Card(T("k.aum"), M(pv), Green),
-                Card(T("k.offers"), $"{newOrders}", Color.DarkOrange), Card(T("k.income"), M(income), Color.MediumPurple) });
-        }
-        else
+            ["blue"] = Color.SteelBlue, ["green"] = Green, ["orange"] = Color.DarkOrange, ["purple"] = Color.MediumPurple
+        };
+        foreach (var k in (System.Text.Json.Nodes.JsonArray)d["kpis"]!)
         {
-            var secs = Db.Scalar(@"SELECT COUNT(*) FROM Holdings h JOIN DepoAccounts d ON d.Id=h.DepoAccountId
-                                   WHERE d.ClientId=@c AND h.Quantity>0", "@c", c);
-            var ops = Db.Scalar(@"SELECT COUNT(*) FROM Transactions t JOIN DepoAccounts d ON d.Id=t.DepoAccountId WHERE d.ClientId=@c", "@c", c);
-            kpis.Controls.AddRange(new Control[] {
-                Card(T("k.pv"), M(pv), Green), Card(T("k.secs"), $"{secs}", Color.SteelBlue),
-                Card(T("k.myops"), $"{ops}", Color.MediumPurple), Card(T("k.myoffers"), $"{newOrders}", Color.DarkOrange) });
+            var accent = colors.TryGetValue(k!["accent"]?.ToString() ?? "", out var c) ? c : Green;
+            kpis.Controls.Add(Card(T(k["key"]!.ToString()), k["value"]!.ToString(), accent));
         }
 
-        const string cols = "Symbol, Name, Price, CAST((Price-PrevPrice)*100.0/NULLIF(PrevPrice,0) AS DECIMAL(9,2)) AS Change";
-        Fill(gUp, Db.Table($"SELECT TOP 8 {cols} FROM Securities WHERE Status=N'Размещён' AND Price>PrevPrice ORDER BY Change DESC"));
-        Fill(gDown, Db.Table($"SELECT TOP 8 {cols} FROM Securities WHERE Status=N'Размещён' AND Price<PrevPrice ORDER BY Change ASC"));
+        Fill(gUp, Api.Table(d["up"]!));
+        Fill(gDown, Api.Table(d["down"]!));
     }
 
     static void Fill(DataGridView g, DataTable t)

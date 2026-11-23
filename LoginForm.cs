@@ -54,6 +54,13 @@ public class LoginForm : Form
 
         // выбор языка под окном входа
         Controls.Add(new LangBar(Color.White, true, card.Width) { Left = card.Left, Top = card.Bottom + 12 });
+        // подсказка о сервере: адрес, к которому подключается приложение
+        Controls.Add(new Label
+        {
+            Text = T("srv.current") + " " + Api.BaseUrl, Left = card.Left, Top = card.Bottom + 44, Width = card.Width,
+            Height = 20, ForeColor = Color.FromArgb(220, 235, 220), TextAlign = ContentAlignment.MiddleCenter,
+            Font = new Font("Segoe UI", 8), Cursor = Cursors.Hand
+        });
 
         ApplyLang();
         Loc.Changed += ApplyLang;
@@ -96,23 +103,13 @@ public class LoginForm : Form
             bool company = tabs.SelectedTab == tpC;
             string id = (company ? tbCompany : tbUser).Text.Trim();
             string pass = (company ? tbCompPass : tbUserPass).Text;
-            var t = company
-                ? Db.Table("SELECT Login,Role,ClientId,PasswordHash FROM Users WHERE CompanyId=@i AND Login=@i AND Role='Client' AND IsActive=1", "@i", id)
-                : Db.Table("SELECT Login,Role,ClientId,PasswordHash FROM Users WHERE Login=@i AND CompanyId IN ('ASB','PERSONAL') AND IsActive=1", "@i", id);
-            bool ok = t.Rows.Count == 1 &&
-                      string.Equals((string)t.Rows[0]["PasswordHash"], Db.Hash(pass), StringComparison.OrdinalIgnoreCase);
-            Session.Login = id;
-            if (!ok)
-            {
-                Db.Audit("Неудачная попытка входа", (company ? "Company=" : "User=") + id);
-                MessageBox.Show(T("login.fail"), T("err.title"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-            Session.Role = (string)t.Rows[0]["Role"];
-            Session.ClientId = t.Rows[0]["ClientId"] as int?;
-            Db.Audit("Вход в систему");
+
+            btn.Enabled = false;
+            try { Api.Login(id, pass, company); }
+            finally { btn.Enabled = true; }
+
             DialogResult = DialogResult.OK;
         }
-        catch (Exception ex) { MessageBox.Show(T("err.db") + "\n" + ex.Message, T("err.title")); }
+        catch (Exception ex) { MessageBox.Show(ex.Message, T("err.title"), MessageBoxButtons.OK, MessageBoxIcon.Warning); }
     }
 }
