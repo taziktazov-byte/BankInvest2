@@ -45,8 +45,8 @@ async function main() {
   if (missing.length) {
     problems++;
     console.log('  Таблицы      : НЕ НАЙДЕНЫ: ' + missing.join(', '));
-    console.log('  Что делать   : откройте db/schema.sql в SSMS, выберите базу '
-      + D.DATABASE + ' и нажмите F5');
+    console.log('  Что сделать   : npm run db:init  (или откройте db/schema.sql в SSMS'
+      + ' — файл сам выбирает базу ' + D.DATABASE + ')');
   } else {
     console.log('  Таблицы      : все 13 на месте');
     const c = await D.get(`SELECT
