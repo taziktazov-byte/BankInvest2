@@ -18,3 +18,7 @@ server/.env
 bankinvest-kit/
 BankInvest_перенос_*.zip
 dist-kit/
+
+# рабочие файлы сборки документа
+docs/diploma/*.svg
+docs/diploma/__pycache__/
