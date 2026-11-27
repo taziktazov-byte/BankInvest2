@@ -157,6 +157,16 @@ GO
 ALTER ROLE db_ddladmin ADD MEMBER bankinvest;
 ```
 
+Право на вызов процедур выдаёт сам `db\schema.sql` (раздел 8). Если процедуры создавались
+вручную, выдайте его отдельно — иначе кнопка «Купить» не работает, а в `sys.procedures`
+процедуры не видны (SQL Server скрывает объекты, на которые у логина нет прав):
+
+```sql
+USE BankInvest;
+GRANT EXECUTE ON OBJECT::dbo.usp_BuyListing   TO bankinvest;
+GRANT EXECUTE ON OBJECT::dbo.usp_UpdatePrices TO bankinvest;
+```
+
 Windows, PowerShell:
 
 ```powershell
@@ -395,7 +405,30 @@ db/seed.sql            демо-данные и учётные записи
 
 ---
 
-## 9. Частые вопросы
+## 9. Перенос на другой компьютер
+
+Нужно показать проект на ноутбуке? Есть готовый сценарий — см. **[ПЕРЕНОС.md](ПЕРЕНОС.md)**.
+Кратко:
+
+| Способ | Команда / действие | Что нужно |
+|---|---|---|
+| Docker (самый быстрый) | `docker compose up -d` | Docker Desktop |
+| Обычный SQL Server | `БЫСТРЫЙ-СТАРТ.bat` | SQL Server + Node.js |
+| Комплект-архив | `tools\make-kit.bat` → перенести zip → `БЫСТРЫЙ-СТАРТ.bat` | Node.js (+ SQL Server) |
+
+Ваша база с данными восстанавливается из `BankInvest.bak` одной командой:
+
+```cmd
+cd server
+set MSSQL_USER=sa
+set MSSQL_PASSWORD=ваш_пароль
+npm run db:restore
+```
+
+Скрипт восстановления сам подтягивает схему до текущей версии (таблица `Sessions`,
+процедуры и право `EXECUTE` для логина приложения).
+
+## 10. Частые вопросы
 
 **Нужен ли SQL Server?** Да, это единственное хранилище данных. Но **напрямую к базе десктоп не ходит**:
 и он, и веб обращаются к API сервера, а сервер — к SQL Server. Именно поэтому два приложения работают

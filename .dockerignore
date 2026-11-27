@@ -1,0 +1,23 @@
+# В образ попадает только то, что нужно серверу
+.git
+.gitignore
+node_modules
+server/node_modules
+server/test
+server/data
+dist
+dist-kit
+bankinvest-kit
+bin
+obj
+.vs
+*.bak
+*.zip
+*.sln
+docs
+ПЕРЕНОС.md
+README_RU.md
+# исходники десктопа (Windows Forms) в контейнере не нужны
+*.cs
+*.csproj
+*.resx

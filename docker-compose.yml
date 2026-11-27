@@ -1,0 +1,52 @@
+# Загрузка SQL Server для Docker: официальный образ Microsoft, схема и демо-данные
+# применяются автоматически при первом старте контейнера.
+#
+#   docker compose up -d        поднять базу + сервер
+#   docker compose logs -f app  смотреть журнал сервера
+#   docker compose down         остановить (данные сохраняются в томе)
+#   docker compose down -v      остановить и удалить данные
+#
+# Пароль ниже — только для локальной демонстрации. Для своего комплекта его
+# можно поменять, но тогда задайте тот же MSSQL_PASSWORD в сервисе app.
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: bankinvest-sql
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "BankInvest!2026"
+      MSSQL_PID: "Developer"
+    ports:
+      - "1433:1433"
+    volumes:
+      - bankinvest-mssql:/var/opt/mssql
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q 'SELECT 1' || /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q 'SELECT 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
+    restart: unless-stopped
+
+  app:
+    build: .
+    container_name: bankinvest-app
+    environment:
+      PORT: "8787"
+      MSSQL_SERVER: "sqlserver,1433"
+      MSSQL_DATABASE: "BankInvest"
+      MSSQL_USER: "sa"
+      MSSQL_PASSWORD: "BankInvest!2026"
+      MSSQL_ENCRYPT: "false"
+      MSSQL_TRUST_CERT: "true"
+      BANKINVEST_AUTO_SCHEMA: "1"
+      BANKINVEST_AUTO_SEED: "1"
+    ports:
+      - "8787:8787"
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  bankinvest-mssql:

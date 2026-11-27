@@ -12,7 +12,9 @@
     "dev": "node --watch src/server.js",
     "db:check": "node src/tools/db-check.js",
     "db:init": "node src/tools/db-init.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "db:restore": "node src/tools/db-restore.js",
+    "sql:doctor": "node src/tools/sql-doctor.js"
   },
   "license": "MIT",
   "dependencies": {

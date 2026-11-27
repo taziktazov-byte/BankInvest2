@@ -34,11 +34,32 @@ async function main() {
   const present = await D.all(`SELECT name, type FROM sys.objects WHERE type IN ('U','P')`);
   const have = new Set(present.map(r => String(r.name)));
   const missing = tables.filter(t => !have.has(t));
+
+  // Права на процедуры проверяем отдельно: sys.objects показывает лишь объекты,
+  // на которые у логина есть хоть какое-то право. Без EXECUTE процедура «невидима».
+  // Право менять структуру: нужно для npm run db:init (schema.sql пересоздаёт
+  // процедуры через DROP + CREATE). Проверяем заранее, чтобы не узнать об этом
+  // посреди скрипта. Только делом (пробное CREATE + откат): HAS_PERMS_BY_NAME
+  // для роли db_ddladmin даёт ложный «нельзя», хотя DDL выполнять можно.
+  const canAlter = await D.canManageSchema();
+
+  const procRights = {};
+  for (const proc of procs) {
+    const row = await D.get(`SELECT HAS_PERMS_BY_NAME(?, 'OBJECT', 'EXECUTE') AS CanExec`, `dbo.${proc}`);
+    procRights[proc] = !!(row && row.CanExec);
+  }
   if (missing.length) {
     problems++;
     console.log('  Таблицы      : НЕ НАЙДЕНЫ: ' + missing.join(', '));
-    console.log('  Что делать   : откройте db/schema.sql в SSMS, выберите базу '
-      + D.DATABASE + ' и нажмите F5');
+    // Частый случай: база восстановлена из старого .bak, где Sessions ещё не было.
+    // schema.sql идемпотентен, поэтому просто применяем его целиком.
+    if (missing.includes('Sessions') && missing.length === 1) {
+      console.log('  Что значит    : база создана до появления таблицы Sessions —');
+      console.log('                  её использует общий сервер для входа по токену.');
+      console.log('                  Данные не пострадают, добавятся только недостающие объекты.');
+    }
+    console.log('  Что сделать   : npm run db:init  (или откройте db/schema.sql в SSMS'
+      + ' — файл сам выбирает базу ' + D.DATABASE + ')');
   } else {
     console.log('  Таблицы      : все 13 на месте');
     const c = await D.get(`SELECT
@@ -51,10 +72,27 @@ async function main() {
     console.log('  Данные       : ' + Object.entries(c || {}).map(([k, v]) => `${k}=${v}`).join(', '));
   }
 
+  const login = process.env.MSSQL_USER || '<логин>';
   for (const proc of procs) {
-    const exists = have.has(proc);
-    if (!exists) problems++;
-    console.log(`  Процедура    : ${proc} — ${exists ? 'есть' : 'НЕТ (выполните db/schema.sql в SSMS)'}`);
+    if (procRights[proc]) {
+      console.log(`  Процедура    : ${proc} — есть, право EXECUTE выдано`);
+    } else {
+      problems++;
+      // Без права на объект SQL Server не показывает его в sys.objects, поэтому
+      // «процедуры нет» и «нет права» неразличимы — сообщаем оба варианта.
+      console.log(`  Процедура    : ${proc} — недоступна логину: нет права EXECUTE или процедуры нет`);
+      console.log('  Что сделать  : под администратором в базе ' + D.DATABASE + ':');
+      console.log(`                 GRANT EXECUTE ON OBJECT::dbo.${proc} TO ${login};`);
+    }
+  }
+
+  if (!canAlter) {
+    console.log('  Схема        : менять структуру нельзя (пробное CREATE отклонено)');
+    console.log('  Что сделать   : перед npm run db:init выполните в SSMS db\\grant-ddl.sql');
+    console.log(`                  (или: ALTER ROLE db_ddladmin ADD MEMBER [${login}];)`);
+    problems++;
+  } else {
+    console.log('  Схема        : менять структуру можно (ALTER есть)');
   }
 
   console.log('─'.repeat(64));
@@ -76,6 +114,8 @@ main()
     console.error('─'.repeat(64));
     if (e.dbMessage && e.dbMessage !== e.message) console.error('  ' + D.describeError(e));
     console.error('  Проверьте службу SQL Server, TCP/IP + порт 1433, логин/пароль и имя базы.');
+    console.error('');
+    console.error('  Подробная диагностика (порт, службы, экземпляры):  npm run sql:doctor');
     await D.closePool();
     process.exit(1);
   });

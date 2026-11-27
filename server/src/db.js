@@ -17,6 +17,7 @@
 //   BANKINVEST_CONNECTION                — полная строка подключения (перекрывает всё выше)
 //   BANKINVEST_AUTO_SCHEMA    1          — при первом запуске выполнить db/schema.sql
 //   BANKINVEST_AUTO_SEED      1          — если база пустая, загрузить db/seed.sql
+//   BANKINVEST_AUTO_UPGRADE   1          — если в существующей базе не хватает таблиц, применить db/schema.sql
 'use strict';
 
 const path = require('node:path');
@@ -33,6 +34,13 @@ const INSTANCE = process.env.MSSQL_INSTANCE || '';
 const POOL_MAX = Number(process.env.MSSQL_POOL_MAX || 10);
 const AUTO_SCHEMA = String(process.env.BANKINVEST_AUTO_SCHEMA ?? '1') !== '0';
 const AUTO_SEED = String(process.env.BANKINVEST_AUTO_SEED ?? '1') !== '0';
+const AUTO_UPGRADE = String(process.env.BANKINVEST_AUTO_UPGRADE ?? '1') !== '0';
+
+// Таблицы, без которых сервер не работает. Sessions появилась позже
+// остальных — именно её чаще всего не хватает в базе, созданной раньше.
+const REQUIRED_TABLES = ['Clients', 'Users', 'DepoAccounts', 'Issuers', 'Securities', 'Holdings',
+  'Transactions', 'DepositCertificates', 'InvestmentProjects', 'AuditLog', 'PriceHistory',
+  'Listings', 'Sessions'];
 
 const boolEnv = (name, def) => {
   const v = process.env[name];
@@ -79,9 +87,32 @@ async function ensurePool() {
     await pool.connect();
   } catch (e) {
     pool = null;
+    // Базы может не быть (свежий SQL Server, контейнер Docker): создаём её в master
+    // и повторяем подключение. schema.sql создаёт только таблицы, не саму базу.
+    if (e && e.number === 4060 && (USER || process.env.BANKINVEST_CREATE_DB !== '0')) {
+      await createDatabase(e);
+      return ensurePool();
+    }
     throw sqlError(e);
   }
   return pool;
+}
+
+/** Создать пустую базу DATABASE, если её ещё нет (подключение через master). */
+async function createDatabase(originalError) {
+  const master = Object.assign({}, CONFIG, { database: 'master' });
+  let probe = null;
+  try {
+    probe = new sql.ConnectionPool(master);
+    await probe.connect();
+    await probe.request().query(
+      `IF DB_ID(N'${String(DATABASE).replace(/'/g, "''")}') IS NULL CREATE DATABASE [${String(DATABASE).replace(/]/g, ']]')}];`);
+  } catch (e) {
+    // нет прав dbcreator или базы правда нет иными причинами — сообщаем исходную ошибку
+    throw sqlError(originalError);
+  } finally {
+    if (probe) { try { await probe.close(); } catch { /* уже закрыт */ } }
+  }
 }
 
 async function closePool() {
@@ -96,14 +127,49 @@ function sqlError(e) {
   out.cause = e;
   out.dbNumber = e && (e.number || e.code);
   out.dbMessage = String((e && e.message) || e);
-  if (['ELOGIN', 'ELOGINFAILED', 'ESOCKET', 'ECONNCLOSED', 'ETIMEOUT', 'ENOTFOUND', 'ECONNREFUSED', 'EINSTLOOKUP'].includes(String(e && e.code))) {
+  // Вход отклонён сервером: сеть в порядке, дело в логине/пароле/режиме.
+  // ВАЖНО: проверяем раньше сетевых кодов — иначе «неверный пароль» выглядит
+  // как «нет связи», и человек правит TCP/IP, который уже настроен.
+  const loginFailure = ['ELOGIN', 'ELOGINFAILED', 'ENOTOPEN'].includes(String(e && e.code))
+    || (e && e.number === 18456);
+  if (loginFailure) {
+    out.key = 'db.login';
+    const who = USER || 'Windows-пользователь';
+    const text = String((e && e.message) || '');
+    const windowsOnly = /Windows authentication only|только проверк|толькі праверк/i.test(text);
+    out.hint = windowsOnly
+      ? `SQL Server настроен «только Windows-вход» — SQL-логин «${who}» принять нельзя. `
+        + 'Включите смешанный режим: SSMS → правой кнопкой по серверу → Свойства → '
+        + 'Безопасность → «Режим проверки подлинности SQL Server и Windows» → перезапуск службы.'
+      : `Сервер доступен, но вход отклонён: «${who}». Проверьте MSSQL_USER / MSSQL_PASSWORD `
+        + 'и что логин включён (ALTER LOGIN ... ENABLE). Подробнее: npm run sql:doctor';
+    return out;
+  }
+  if (['ESOCKET', 'ECONNCLOSED', 'ETIMEOUT', 'ENOTFOUND', 'ECONNREFUSED', 'EINSTLOOKUP'].includes(String(e && e.code))) {
     out.key = 'db.connect';
     out.hint = `Сервер не отвечает: ${DB_FILE}. Проверьте службу SQL Server и TCP/IP (порт 1433).`;
     return out;
   }
   if (e && e.number === 4060) { out.key = 'db.connect'; out.hint = `База «${DATABASE}» не найдена — создайте её или разрешите BANKINVEST_AUTO_SCHEMA`; return out; }
-  if (e && e.number === 18456) { out.key = 'db.login'; out.hint = `Пользователь «${USER || 'Windows'}» не прошёл проверку подлинности (MSSQL_USER / MSSQL_PASSWORD)`; return out; }
-  // 229/262/230 — нет прав; 15151 — нет права на изменение объекта
+  // 208 — таблицы нет: база старше текущей схемы (например, из .bak без Sessions).
+  if (e && (e.number === 208 || e.number === 207)) {
+    const m = String((e && e.message) || '').match(/['«“"]([A-Za-z_][A-Za-z0-9_.]*)['»”"]/);
+    out.key = 'db.noschema';
+    out.hint = `В базе «${DATABASE}» нет нужной таблицы или столбца${m ? ` (${m[1]})` : ''} — `
+      + 'она создана до текущей схемы. Выполните: npm run db:init '
+      + '(или откройте db/schema.sql в SSMS и нажмите F5).';
+    return out;
+  }
+  // 3701/15151 — нет права менять объект (schema.sql делает DROP PROCEDURE),
+  // 262 — нет права CREATE. Отдельный совет, иначе человек не поймёт, что делать.
+  if (e && (e.number === 3701 || e.number === 15151 || e.number === 262)) {
+    out.key = 'db.permission';
+    out.hint = `У логина «${USER || 'Windows'}» нет права менять структуру базы. `
+      + 'Выполните в SSMS файл db\\grant-ddl.sql (или: ALTER ROLE db_ddladmin ADD MEMBER ['
+      + `${USER || 'bankinvest'}];), затем повторите npm run db:init`;
+    return out;
+  }
+  // 229/230 — нет прав на данные
   if (e && (e.number === 229 || e.number === 262 || e.number === 230 || e.number === 15151)) {
     out.key = 'db.permission';
     out.hint = 'Нужны права db_datareader, db_datawriter, а для изменения процедур — db_ddladmin (или владелец схемы dbo)';
@@ -129,6 +195,13 @@ function describeError(e) {
 }
 
 // ---------------------------------------------------------------- helpers
+// mssql НЕ понимает '?': он ждёт именованные параметры (@p1), которые объявляет
+// в sp_executesql. Плейсхолдеры переводим по порядку, не задевая '?' в литералах.
+function namedParams(text) {
+  let n = 0;
+  return String(text).replace(/'(?:[^']|'')*'|\?/g, m => (m === '?' ? '@p' + (++n) : m));
+}
+
 function bind(req, params) {
   for (let i = 0; i < params.length; i++) {
     const v = params[i];
@@ -198,7 +271,7 @@ async function query(text, params = [], conn = null) {
   const p = conn || await ensurePool();
   const req = bind(p.request(), params);
   try {
-    const r = await req.query(text);
+    const r = await req.query(namedParams(text));
     return { rows: firstRows(r), raw: r };
   } catch (e) {
     const mapped = tradeError(e);
@@ -237,7 +310,7 @@ async function exec(text, params = [], conn = null) {
   const p = conn || await ensurePool();
   const req = bind(p.request(), params);
   try {
-    return await req.query(text);
+    return await req.query(namedParams(text));
   } catch (e) {
     const mapped = tradeError(e);
     if (mapped) throw new ApiError(mapped, 400);
@@ -357,11 +430,29 @@ async function runScript(script, label) {
 async function init() {
   await ensurePool();
   let fresh = false;
-  if (!(await scalar("SELECT OBJECT_ID('Clients','U')"))) {
+  const hasClients = !!(await scalar("SELECT OBJECT_ID('Clients','U')"));
+  if (!hasClients) {
     if (!AUTO_SCHEMA) {
       throw new ApiError('db.noschema', 500);
     }
     await runScript(readSqlFile('schema.sql'), 'schema');
+  } else if (AUTO_SCHEMA) {
+    // База уже есть — возможно, она старше текущего schema.sql (например,
+    // восстановлена из .bak и в ней нет Sessions). schema.sql идемпотентен:
+    // CREATE только при отсутствии объекта, процедуры пересоздаются.
+    // Без этого сервер падал на первом же SELECT из Sessions.
+    const missing = [];
+    for (const t of REQUIRED_TABLES) {
+      const id = await scalar('SELECT OBJECT_ID(?, \'U\')', t);
+      if (!id) missing.push(t);
+    }
+    if (missing.length) {
+      if (!AUTO_UPGRADE) {
+        throw new ApiError('db.noschema', 500, `Нет таблиц: ${missing.join(', ')}. `
+          + 'Выполните db/schema.sql или разрешите BANKINVEST_AUTO_UPGRADE=1');
+      }
+      await runScript(readSqlFile('schema.sql'), 'schema');
+    }
   }
   const empty = Number(await scalar('SELECT COUNT(*) FROM Clients')) === 0;
   if (empty) {
@@ -391,10 +482,33 @@ async function audit(login, action, details = '') {
   } catch { /* журнал не должен ломать операцию */ }
 }
 
+/**
+ * Может ли текущий логин менять структуру базы (создавать таблицы, пересоздавать
+ * процедуры)? Проверяем ДЕЛОМ, а не через HAS_PERMS_BY_NAME: роль db_ddladmin
+ * не даёт ровно разрешение 'ALTER' на уровне базы, но DDL выполнять позволяет —
+ * HAS_PERMS_BY_NAME в этом случае отвечает 0 и вводит в заблуждение.
+ *
+ * Пробуем создать временную процедуру в отдельной транзакции и откатываем её.
+ * Временная процедура (#имя) не попадает в базу, но право CREATE PROCEDURE
+ * всё равно проверяется.
+ */
+async function canManageSchema() {
+  const tr = await ensurePool().then(p => p.transaction());
+  await tr.begin();
+  try {
+    await tr.request().query('CREATE PROCEDURE #CanManageSchemaProbe AS SELECT 1');
+    await tr.rollback();
+    return true;
+  } catch {
+    try { await tr.rollback(); } catch { /* уже откачена */ }
+    return false;
+  }
+}
+
 module.exports = {
-  sql, ensurePool, closePool, init, updatePrices, audit,
+  sql, ensurePool, closePool, init, updatePrices, audit, canManageSchema,
   query, all, get, scalar, run, exec, tx,
   hash, now, toIso, err, ApiError, describeError,
-  toObjects, firstRows,   // экспортируются для тестов
+  toObjects, firstRows, namedParams,   // экспортируются для тестов
   DB_FILE, DATABASE, SERVER, CONFIG,
 };
