@@ -11,6 +11,7 @@ FONT = "Arial, Helvetica, sans-serif"
 BLACK = "#000000"
 WHITE = "#ffffff"
 GREY = "#f2f2f2"
+K = 0.62          # физический масштаб SVG: крупнее шрифты после вставки в Word
 
 
 class Svg:
@@ -99,8 +100,15 @@ class Svg:
         k = 0.58 if not bold else 0.62
         return len(s) * size * k
 
-    def svg(self):
-        head = (f'<svg xmlns="http://www.w3.org/2000/svg" width="{self.w}" height="{self.h}" '
+    def svg(self, k=None):
+        """SVG с физическим масштабом k: координаты те же, размер файла меньше.
+
+        Без этого шрифт 14 px при вставке в Word шириной 16,5 см превращается
+        в 4 пт, и диаграмма в записке не читается.
+        """
+        k = K if k is None else k
+        w, h = self.w * k, self.h * k
+        head = (f'<svg xmlns="http://www.w3.org/2000/svg" width="{w:.1f}" height="{h:.1f}" '
                 f'viewBox="0 0 {self.w} {self.h}">'
                 f'<rect width="{self.w}" height="{self.h}" fill="{WHITE}"/>')
         return head + '\n'.join(self.parts) + '</svg>'
@@ -563,7 +571,7 @@ def component_diagram(path):
 
     # 1-й ряд: клиенты
     web = comp(70, 60, 330, 96, "Веб-клиент", "server/web: app.js, index.html")
-    dsk = comp(1000, 60, 330, 96, "Десктоп WPF", "BankInvest.exe (.NET 8)")
+    dsk = comp(1000, 60, 330, 96, "Десктоп WinForms", "BankInvest.exe (.NET 8)")
 
     # 2-й ряд: шлюз API
     api = comp(470, 250, 460, 100, "Сервер приложения", "server.js: маршруты /api/*, статика web/")
@@ -633,7 +641,7 @@ def deployment_diagram(path):
             s.lines(x + w / 2, y + 52, sub.split("\n"), size=12)
 
     node(60, 120, 300, 150, "Рабочие места сотрудников",
-         "браузер (веб-версия)\nWPF-приложение (десктоп)\nWindows 10/11 + .NET 8")
+         "браузер (веб-версия)\nWinForms-приложение (десктоп)\nWindows 10/11 + .NET 8")
     node(450, 120, 260, 150, "Коммутатор ЛВС", "локальная сеть банка\nпорт 8787 (HTTP API)")
     node(800, 120, 300, 170, "Сервер приложений",
          "Node.js 22\nserver.js (/api/*)\nстатические файлы web/")

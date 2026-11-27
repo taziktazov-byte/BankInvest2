@@ -22,3 +22,8 @@ dist-kit/
 # рабочие файлы сборки документа
 docs/diploma/*.svg
 docs/diploma/__pycache__/
+
+# рабочие файлы сборки пояснительной записки
+docs/pz/__pycache__/
+docs/pz/shots/*.svg
+docs/pz/*.pyc
