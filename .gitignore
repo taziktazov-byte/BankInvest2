@@ -13,3 +13,17 @@ obj/
 .env
 .env.local
 server/.env
+
+# Комплект для переноса на другой компьютер (собирается tools/make-kit.bat)
+bankinvest-kit/
+BankInvest_перенос_*.zip
+dist-kit/
+
+# рабочие файлы сборки документа
+docs/diploma/*.svg
+docs/diploma/__pycache__/
+
+# рабочие файлы сборки пояснительной записки
+docs/pz/__pycache__/
+docs/pz/shots/*.svg
+docs/pz/*.pyc
