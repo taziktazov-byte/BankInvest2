@@ -16,7 +16,6 @@ import docbuild as D
 import part1
 import part2
 import part3
-import part4
 import part5
 import part6
 
@@ -60,8 +59,6 @@ def build(path):
     part1.chapter1(doc)
     part2.chapter2(doc)
     part3.chapter3(doc)
-    part4.chapter4(doc)
-    part5.chapter5(doc)
     part5.conclusion(doc)
     part5.sources(doc)
     part6.appendices(doc)

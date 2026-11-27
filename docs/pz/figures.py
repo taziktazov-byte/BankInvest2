@@ -130,76 +130,88 @@ def _elbow(s, pts, dashed=True):
     s.path(d, sw=1.0, dash="6,4" if dashed else None)
 
 
-def datalogic_clients(path):
-    """Даталогическая модель, часть 1: клиентский и портфельный контуры."""
-    s = Svg(880, 1100)
-    s.text(440, 40, "Даталогическая модель базы данных: клиентский "
-                    "и портфельный контуры", size=16, bold=True)
-    s.text(24, 74, "Клиентский контур", size=14, bold=True, anchor="start")
-    s.text(430, 74, "Портфельный контур", size=14, bold=True, anchor="start")
+def _db_schema(path, title, left_title, right_title, logical):
+    """Схема БД из двух колонок: клиентский/портфельный или рыночный контуры.
 
-    clients = _dt_table(s, 24, 88, "Clients", [
+    logical=True  — логическая схема: только имена таблиц и реквизитов с
+                    пометками PK/FK (типы данных не показываются);
+    logical=False — физическая схема: те же реквизиты с типами данных SQL Server.
+    """
+    s = Svg(880, 1100)
+    s.text(440, 40, title, size=16, bold=True)
+    s.text(24, 74, left_title, size=14, bold=True, anchor="start")
+    s.text(430, 74, right_title, size=14, bold=True, anchor="start")
+
+    def tbl(x, y, name, cols):
+        if logical:
+            cols = [(c, "", k) for c, _t, k in cols]
+        return _dt_table(s, x, y, name, cols)
+
+    clients = tbl(24, 88, "Clients", [
         ("Id", "INT IDENTITY", "PK"), ("Name", "NVARCHAR(200)", ""),
         ("UNP", "CHAR(9)", ""), ("Address", "NVARCHAR(300)", ""),
         ("Contacts", "NVARCHAR(200)", ""), ("Status", "NVARCHAR(30)", ""),
         ("Kind", "NVARCHAR(10)", "")])
-    depo = _dt_table(s, 24, 320, "DepoAccounts", [
+    depo = tbl(24, 320, "DepoAccounts", [
         ("Id", "INT IDENTITY", "PK"), ("ClientId", "INT", "FK"),
         ("Number", "NVARCHAR(30)", ""), ("Opened", "DATE", "")])
-    users = _dt_table(s, 24, 480, "Users", [
+    users = tbl(24, 480, "Users", [
         ("Id", "INT IDENTITY", "PK"), ("CompanyId", "NVARCHAR(30)", ""),
         ("Login", "NVARCHAR(50)", ""), ("PasswordHash", "CHAR(64)", ""),
         ("Role", "NVARCHAR(20)", ""), ("ClientId", "INT", "FK"),
         ("IsActive", "BIT", "")])
-    sess = _dt_table(s, 24, 730, "Sessions", [
+    sess = tbl(24, 730, "Sessions", [
         ("Token", "NVARCHAR(64)", "PK"), ("UserId", "INT", "FK"),
         ("Login", "NVARCHAR(50)", ""), ("Role", "NVARCHAR(20)", ""),
         ("ClientId", "INT", ""), ("SeenAt", "DATETIME", "")])
-    audit = _dt_table(s, 24, 940, "AuditLog", [
+    audit = tbl(24, 940, "AuditLog", [
         ("Id", "INT IDENTITY", "PK"), ("At", "DATETIME", ""),
         ("UserLogin", "NVARCHAR(50)", ""), ("Action", "NVARCHAR(100)", ""),
         ("Details", "NVARCHAR(500)", "")])
 
-    hold = _dt_table(s, 430, 88, "Holdings", [
+    hold = tbl(430, 88, "Holdings", [
         ("Id", "INT IDENTITY", "PK"), ("DepoAccountId", "INT", "FK"),
         ("SecurityId", "INT", "FK"), ("Quantity", "INT", ""),
         ("TargetPct", "DECIMAL(5,2)", "")])
-    cert = _dt_table(s, 430, 300, "DepositCertificates", [
+    cert = tbl(430, 300, "DepositCertificates", [
         ("Id", "INT IDENTITY", "PK"), ("ClientId", "INT", "FK"),
         ("Amount", "DECIMAL(18,2)", ""), ("Rate", "DECIMAL(5,2)", ""),
         ("DemandRate", "DECIMAL(5,2)", ""), ("StartDate", "DATE", ""),
         ("EndDate", "DATE", ""), ("Status", "NVARCHAR(20)", "")])
-    proj = _dt_table(s, 430, 560, "InvestmentProjects", [
+    tbl(430, 560, "InvestmentProjects", [
         ("Id", "INT IDENTITY", "PK"), ("Name", "NVARCHAR(200)", ""),
         ("Rate", "DECIMAL(6,2)", ""), ("CashFlows", "NVARCHAR(500)", "")])
 
-    def mid(b):
-        return b["mid"]
-
-    # клиент → счёт депо (внутри колонки)
+    # клиент → счёт депо
     _elbow(s, [(120, clients["y"] + clients["h"]), (120, depo["y"])])
-    # счёт депо → позиция портфеля (коридор между колонками)
-    _elbow(s, [(354, mid(depo)), (392, mid(depo)), (392, mid(hold)), (430, mid(hold))])
+    # счёт депо → позиция портфеля
+    _elbow(s, [(354, depo["mid"]), (392, depo["mid"]), (392, hold["mid"]),
+               (430, hold["mid"])])
     # клиент → депозитный сертификат
     _elbow(s, [(354, clients["y"] + 70), (410, clients["y"] + 70),
-               (410, mid(cert)), (430, mid(cert))])
+               (410, cert["mid"]), (430, cert["mid"])])
     # учётная запись → сеанс
     _elbow(s, [(120, users["y"] + users["h"]), (120, sess["y"])])
-
     open(path, "w", encoding="utf-8").write(s.svg())
 
 
-def datalogic_market(path):
-    """Даталогическая модель, часть 2: рыночный контур и сделки."""
+def _db_market(path, logical):
+    """Рыночный контур и сделки: общий код для логической и физической схем."""
     s = Svg(880, 830)
-    s.text(440, 40, "Даталогическая модель базы данных: рыночный контур и сделки",
+    s.text(440, 40, ("Логическая схема базы данных" if logical else
+                     "Физическая схема базы данных") + ": рыночный контур и сделки",
            size=16, bold=True)
     s.text(24, 74, "Рыночный контур", size=14, bold=True, anchor="start")
     s.text(430, 74, "Сделки и цены", size=14, bold=True, anchor="start")
 
-    iss = _dt_table(s, 24, 88, "Issuers", [
+    def tbl(x, y, name, cols):
+        if logical:
+            cols = [(c, "", k) for c, _t, k in cols]
+        return _dt_table(s, x, y, name, cols)
+
+    iss = tbl(24, 88, "Issuers", [
         ("Id", "INT IDENTITY", "PK"), ("Name", "NVARCHAR(200)", "")])
-    sec = _dt_table(s, 24, 220, "Securities", [
+    sec = tbl(24, 220, "Securities", [
         ("Id", "INT IDENTITY", "PK"), ("Symbol", "NVARCHAR(20)", ""),
         ("Name", "NVARCHAR(200)", ""), ("IssuerId", "INT", "FK"),
         ("Kind", "NVARCHAR(50)", ""), ("Segment", "NVARCHAR(50)", ""),
@@ -207,33 +219,107 @@ def datalogic_market(path):
         ("Rate", "DECIMAL(5,2)", ""), ("ExpenseRatio", "DECIMAL(5,2)", ""),
         ("Status", "NVARCHAR(30)", ""), ("Price", "DECIMAL(18,2)", ""),
         ("PrevPrice", "DECIMAL(18,2)", "")])
-    lst = _dt_table(s, 24, 620, "Listings", [
+    lst = tbl(24, 620, "Listings", [
         ("Id", "INT IDENTITY", "PK"), ("SellerClientId", "INT", "FK"),
         ("SecurityId", "INT", "FK"), ("Quantity", "INT", ""),
         ("Price", "DECIMAL(18,2)", ""), ("Status", "NVARCHAR(20)", ""),
         ("CreatedAt", "DATETIME", "")])
-
-    tx = _dt_table(s, 430, 220, "Transactions", [
+    tx = tbl(430, 220, "Transactions", [
         ("Id", "INT IDENTITY", "PK"), ("DepoAccountId", "INT", "FK"),
         ("SecurityId", "INT", "FK"), ("Type", "NVARCHAR(10)", ""),
         ("Quantity", "INT", ""), ("Price", "DECIMAL(18,2)", ""),
         ("Commission", "DECIMAL(18,2)", ""), ("Status", "NVARCHAR(20)", ""),
         ("Date", "DATETIME", "")])
-    ph = _dt_table(s, 430, 540, "PriceHistory", [
+    ph = tbl(430, 540, "PriceHistory", [
         ("Id", "BIGINT IDENTITY", "PK"), ("SecurityId", "INT", "FK"),
         ("At", "DATETIME", ""), ("Price", "DECIMAL(18,2)", "")])
 
-    # эмитент → бумага (внутри колонки)
     _elbow(s, [(120, iss["y"] + iss["h"]), (120, sec["y"])])
-    # бумага → предложение о продаже
     _elbow(s, [(120, sec["y"] + sec["h"]), (120, lst["y"])])
-    # бумага → сделки
     _elbow(s, [(354, sec["y"] + 60), (392, sec["y"] + 60), (392, tx["y"] + 40),
                (430, tx["y"] + 40)])
-    # бумага → история цен
     _elbow(s, [(354, sec["y"] + 250), (412, sec["y"] + 250), (412, ph["mid"]),
                (430, ph["mid"])])
+    open(path, "w", encoding="utf-8").write(s.svg())
 
+
+def datalogic_clients(path):
+    """Физическая схема, часть 1: клиентский и портфельный контуры (с типами)."""
+    _db_schema(path, "Физическая схема базы данных: клиентский "
+                     "и портфельный контуры", "Клиентский контур",
+               "Портфельный контур", logical=False)
+
+
+def datalogic_market(path):
+    """Физическая схема, часть 2: рыночный контур и сделки (с типами)."""
+    _db_market(path, logical=False)
+
+
+def logical_clients(path):
+    """Логическая схема, часть 1: клиентский и портфельный контуры (без типов)."""
+    _db_schema(path, "Логическая схема базы данных: клиентский "
+                     "и портфельный контуры", "Клиентский контур",
+               "Портфельный контур", logical=True)
+
+
+def logical_market(path):
+    """Логическая схема, часть 2: рыночный контур и сделки (без типов)."""
+    _db_market(path, logical=True)
+
+
+def context_diagram(path):
+    """Контекстная диаграмма (IDEF0, уровень A-0): входы, выходы, управление, механизмы."""
+    s = Svg(1500, 880)
+    s.text(750, 40, "Контекстная диаграмма системы управления инвестициями "
+                    "и ценными бумагами банка", size=16, bold=True)
+
+    BX, BY, BW, BH = 500, 290, 520, 260
+    s.rect(BX, BY, BW, BH, fill=WHITE, sw=1.6)
+    s.lines(BX + BW / 2, BY + 85, ["Сетевая программная система",
+                                   "управления инвестициями", "и ценными бумагами банка"],
+            size=16, lh=26, bold=True)
+    s.text(BX + BW - 20, BY + BH - 24, "A-0", size=14, anchor="end")
+
+    # входы слева: подпись, затем стрелка до рамки
+    inputs = [
+        (350, ["Сведения о клиентах", "(УНП, реквизиты, счета депо)"]),
+        (430, ["Выпуски ценных бумаг", "(эмитент, вид, номинал)"]),
+        (510, ["Заявки клиентов", "на покупку и продажу"]),
+    ]
+    for y, lines in inputs:
+        s.lines(70, y - 8, lines, size=13, anchor="start", lh=19)
+        s.line(360, y, BX, y, arrow=True)
+
+    # выходы справа
+    outputs = [
+        (350, ["Портфель клиента, доли", "и суммы к действию"]),
+        (430, ["Исполненные сделки", "и выписка по счёту депо"]),
+        (510, ["Отчёты о доходе банка", "и востребованных бумагах"]),
+    ]
+    for y, lines in outputs:
+        s.line(BX + BW, y, 1140, y, arrow=True)
+        s.lines(1155, y - 8, lines, size=13, anchor="start", lh=19)
+
+    # управление сверху
+    for x, lines in ((BX + 120, ["Правила банка,", "тарифы, комиссия 0,5 %"]),
+                     (BX + 400, ["Требования к учёту", "ценных бумаг"])):
+        s.line(x, 205, x, BY, arrow=True)
+        s.lines(x, 168, lines, size=13, lh=19)
+    s.text(750, 130, "Управление", size=13, bold=True)
+
+    # механизмы снизу
+    for x, lines in ((BX + 120, ["Сотрудник банка, клиент", "(настольное приложение,",
+                                 "веб-браузер)"]),
+                     (BX + 400, ["Сервер приложений Node.js", "и СУБД SQL Server"])):
+        s.line(x, BY + BH, x, 640, arrow=True)
+        s.lines(x, 665, lines, size=13, lh=19)
+    s.text(750, 745, "Механизмы", size=13, bold=True)
+
+    s.text(90, 130, "Входы", size=13, bold=True, anchor="start")
+    s.text(1155, 130, "Выходы", size=13, bold=True, anchor="start")
+    s.text(750, 820, "Слева — входы, справа — выходы, сверху — управление "
+                     "(правила и ограничения), снизу — механизмы (исполнители)",
+           size=13, italic=True)
     open(path, "w", encoding="utf-8").write(s.svg())
 
 
@@ -246,28 +332,23 @@ def work_scheme(path):
     s = Svg(1500, 760)
     s.text(750, 44, "Схема работы системы", size=17, bold=True)
 
-    def box(x, y, w, h, title, lines, label=None):
+    def box(x, y, w, h, title, lines):
         s.rect(x, y, w, h, fill=WHITE, sw=1.3)
         s.rect(x, y, w, 42, fill=GREY2, sw=1.3)
         s.text(x + w / 2, y + 29, title, size=15, bold=True)
         s.lines(x + w / 2, y + 74, lines, size=13, lh=20)
-        if label:
-            s.text(x + w / 2, y + h - 14, label, size=12, italic=True)
-        return {"x": x, "y": y, "w": w, "h": h, "cx": x + w / 2,
-                "top": y, "bottom": y + h}
+        return {"x": x, "y": y, "w": w, "h": h}
 
-    left = box(60, 80, 320, 130, "Настольное приложение",
-               ["Windows Forms, C#, .NET 8"])
-    right = box(620, 80, 320, 130, "Веб-приложение",
-                ["браузер, HTML и JavaScript"])
-    srv = box(340, 290, 620, 150, "Сервер приложений Node.js",
-              ["проверка сеанса и прав по роли, бизнес-логика,",
-               "REST API и раздача веб-приложения"])
-    db = box(340, 480, 620, 150, "База данных SQL Server",
-             ["13 таблиц, хранимые процедуры usp_BuyListing",
-              "и usp_UpdatePrices, журналы Transactions и AuditLog"])
+    box(60, 80, 320, 130, "Настольное приложение", ["Windows Forms, C#, .NET 8"])
+    box(620, 80, 320, 130, "Веб-приложение", ["браузер, HTML и JavaScript"])
+    box(340, 290, 620, 150, "Сервер приложений Node.js",
+        ["проверка сеанса и прав по роли, бизнес-логика,",
+         "REST API и раздача веб-приложения"])
+    box(340, 480, 620, 150, "База данных SQL Server",
+        ["13 таблиц, хранимые процедуры usp_BuyListing",
+         "и usp_UpdatePrices, журналы Transactions и AuditLog"])
 
-    # оба клиента — к серверу
+    # оба клиента обращаются к серверу; стрелки двусторонние (запрос и ответ)
     s.line(220, 210, 220, 250)
     s.line(220, 250, 470, 250)
     s.line(470, 250, 470, 290, arrow=True, start_arrow=True)
@@ -277,7 +358,7 @@ def work_scheme(path):
     s.label(300, 240, "HTTP + JSON", size=12)
     s.label(880, 240, "HTTP + JSON", size=12)
 
-    # сервер — база
+    # сервер обращается к базе данных
     s.line(650, 440, 650, 480, arrow=True)
     s.label(668, 462, "T-SQL, порт 1433", size=12, anchor="start")
 
@@ -593,6 +674,9 @@ FIGURES = {
     "fig_er": er_model,
     "fig_datalogic_clients": datalogic_clients,
     "fig_datalogic_market": datalogic_market,
+    "fig_logical_clients": logical_clients,
+    "fig_logical_market": logical_market,
+    "fig_context": context_diagram,
     "fig_uc_roles": use_case_roles,
     "fig_work": work_scheme,
     "fig_alg_buy": algorithm_buy,

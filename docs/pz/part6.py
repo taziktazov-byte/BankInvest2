@@ -92,6 +92,11 @@ def appendices(doc):
     b = logic.index("\n}\n", a) + 2
     D.listing(doc, logic[a:b].rstrip(), size=9)
 
+    D.p(doc, "Исполнение сделки купли-продажи в базе данных (usp_BuyListing):", indent=False)
+    b_start = schema.index("CREATE PROCEDURE usp_BuyListing")
+    b_end = schema.index("/* ---------------- 8. Права на процедуры")
+    D.listing(doc, schema[b_start:b_end].rstrip(), size=9)
+
     D.p(doc, "Исполнение покупки на стороне сервера — вызов хранимой процедуры и "
              "преобразование кода ошибки базы данных в сообщение интерфейса (logic.js):",
          indent=False)
